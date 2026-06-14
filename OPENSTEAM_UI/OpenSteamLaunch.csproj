@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    
+    <!-- Application Info -->
+    <AssemblyTitle>OpenSteam</AssemblyTitle>
+    <AssemblyDescription>OpenSteam Tool Setup</AssemblyDescription>
+    <AssemblyCompany>YourCompany</AssemblyCompany>
+	<AssemblyName>OpenSteam</AssemblyName>
+    <AssemblyProduct>Steam Config Editor</AssemblyProduct>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    
+    <!-- Icon (place your icon.ico in the project root) -->
+    <ApplicationIcon>iicon.ico</ApplicationIcon>
+    
+    <!-- Single File Publishing -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <ApplicationIcon>iicon.ico</ApplicationIcon>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- Include icon file -->
+  <ItemGroup>
+    <Content Include="iicon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Guna.UI2.WinForms" Version="2.0.4.7" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="iicon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+	<EmbeddedResource Include="background.png" />
+  </ItemGroup>
+    <ItemGroup>
+	<EmbeddedResource Include="gamelist.png" />
+  </ItemGroup>
+
+</Project>
