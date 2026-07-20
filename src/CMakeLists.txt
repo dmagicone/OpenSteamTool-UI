@@ -107,12 +107,14 @@ add_library(OpenSteamTool SHARED
     Utils/Config/ConfigFileWatcher.cpp
     Utils/Config/LuaConfig.cpp
     Utils/Config/LuaFileWatcher.cpp
+    Utils/CloudRedirect/CloudRedirectHost.cpp
     Utils/HookSupport/VehCommon.cpp
     Utils/Logging/Log.cpp
     Utils/SteamMetadata/IPCLoader.cpp
     Utils/SteamMetadata/ManifestClient.cpp
     Utils/SteamMetadata/PatternLoader.cpp
     Utils/SteamMetadata/RemoteToml.cpp
+    Utils/SteamMetadata/StatsClient.cpp
     Utils/SteamMetadata/SteamDiagnostics.cpp
 
     # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
