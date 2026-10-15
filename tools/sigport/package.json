@@ -1,0 +1,13 @@
+{
+  "name": "sigport",
+  "private": true,
+  "type": "module",
+  "description": "Ports OpenSteamTool pattern/IPC signature files to new Steam client builds",
+  "scripts": {
+    "update": "bun src/cli.ts update",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "iced-x86": "1.21.0"
+  }
+}
