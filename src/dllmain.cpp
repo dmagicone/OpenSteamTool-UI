@@ -1,7 +1,9 @@
 #include "dllmain.h"
+#include "Branding.h"
 #include "Hook/HookManager.h"
 #include "Utils/Config/ConfigFileWatcher.h"
 #include "Utils/Config/LuaFileWatcher.h"
+#include "Utils/Config/Paths.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
 #include "Utils/SteamMetadata/PatternLoader.h"
@@ -23,8 +25,10 @@ bool InitializeSteamComponents()
     sprintf_s(SteamUIPath,     kRuntimePathCapacity, "%s\\steamui.dll",        SteamInstallPath);
     sprintf_s(DiversionPath,   kRuntimePathCapacity, "%s\\bin\\diversion.dll", SteamInstallPath);
     sprintf_s(LuaDir,          kRuntimePathCapacity, "%s\\config\\lua",        SteamInstallPath);
-    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s\\opensteamtool.toml", SteamInstallPath);
-    
+    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s",
+              Paths::ResolveConfigFile(steamInstallPath).string().c_str());
+    LOG_INFO("Config file: {}", ConfigPath);
+
     client_hModule = OSTPlatform::DynamicLibrary::Load(SteamclientPath);
     if (!client_hModule) {
         LOG_ERROR("Load steamclient64.dll failed: {} (err={})",
@@ -45,8 +49,17 @@ bool InitializeSteamComponents()
 // memory, or installs detours runs here on a worker thread — we MUST NOT do
 // any of that from inside DllMain (loader lock).
 static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
+    // Before Log::Init: migrating the data dir must happen while nothing has
+    // a log file open inside it.
+    const Paths::DataDirInit dataDir =
+        Paths::InitDataDir(OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule));
     Log::Init(selfModule);
-    LOG_INFO("OpenSteamTool init thread started");
+    LOG_INFO("{} init thread started", Branding::kProductName);
+    if (dataDir.migrated)
+        LOG_INFO("Migrated legacy {} directory to {}", Branding::kLegacyDataDirName, Paths::DataDir().string());
+    if (!dataDir.error.empty())
+        LOG_WARN("Could not migrate legacy {} directory ({}); still using it",
+                 Branding::kLegacyDataDirName, dataDir.error);
 
     if (!InitializeSteamComponents()) {
         LOG_ERROR("InitializeSteamComponents failed");
@@ -86,7 +99,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     // [cloud].enabled is set and cloud_redirect.dll is present.
     CloudRedirectHost::Initialize(SteamInstallPath);
 
-    LOG_INFO("OpenSteamTool init complete");
+    LOG_INFO("{} init complete", Branding::kProductName);
     return 0;
 }
 

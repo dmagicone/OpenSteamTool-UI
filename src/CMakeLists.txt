@@ -4,7 +4,7 @@ project(OpenSteamTool VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
-set(OPENSTEAMTOOL_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
+set(OpenSteamTool_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
 
 # Allow CMAKE_MSVC_RUNTIME_LIBRARY to control runtime selection for all targets,
 # including dependencies pulled in via FetchContent.
@@ -36,7 +36,7 @@ configure_file(
 # Dependency recipes (FetchContent-backed, cached at <repo>/.deps).
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(OPENSTEAMTOOL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
+set(OpenSteamTool_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
 include(Lua)
 include(Spdlog)
 include(Protobuf)
@@ -46,14 +46,14 @@ include(LogMacros)
 # Build the host code generators (ipc_codegen) in their own binary subtree so
 # their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
 # means only the tools actually depended on (ipc_codegen) get built here.
-add_subdirectory("${OPENSTEAMTOOL_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
-include("${OPENSTEAMTOOL_TOOLS_DIR}/cmake/IPCCodegen.cmake")
+add_subdirectory("${OpenSteamTool_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
+include("${OpenSteamTool_TOOLS_DIR}/cmake/IPCCodegen.cmake")
 
 set(IPC_IDL "${CMAKE_CURRENT_SOURCE_DIR}/Steam/IPCMessages.steamd")
 # Per-config output dir, mirroring the protobuf recipe below: a Multi-Config
 # build invokes the generator once per config, and a single shared output file
 # would ping-pong between the Release/Debug graphs and force needless rebuilds.
-opensteamtool_add_ipc_codegen(IPC_GEN
+OpenSteamTool_add_ipc_codegen(IPC_GEN
     IDL "${IPC_IDL}"
     CPP_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
 )
@@ -107,6 +107,7 @@ add_library(OpenSteamTool SHARED
     Utils/Config/ConfigFileWatcher.cpp
     Utils/Config/LuaConfig.cpp
     Utils/Config/LuaFileWatcher.cpp
+    Utils/Config/Paths.cpp
     Utils/CloudRedirect/CloudRedirectHost.cpp
     Utils/HookSupport/VehCommon.cpp
     Utils/Logging/Log.cpp
@@ -165,7 +166,7 @@ target_link_libraries(OpenSteamTool PRIVATE
 
 # Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
 target_compile_definitions(OpenSteamTool PRIVATE
-    $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
+    $<$<CONFIG:Debug>:OpenSteamTool_LOGGING_ENABLED>
 )
 
 # ---------------------------------------------------------------------------
