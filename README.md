@@ -13,7 +13,7 @@
   </p>
 </div>
 
-OpenSteamTool is a fork of [OpenSteamTool](https://github.com/OpenSteam001/OpenSteamTool). It adds:
+OpenSteamTool is a fork of [OpenSteamTool](https://github.com/OpenSteam001/OpenSteamTool) and forked of [FireBox - OpensteamTool Fork}(https://github.com/SvnFrs/firebox). It adds:
 
 - **Self-maintained signatures.** [Smokestack](https://github.com/SvnFrs/smokestack) watches Valve's client releases and ports OpenSteamTool's hook signatures to each new build within hours, using [`tools/sigport`](tools/sigport).
 - **Graceful degradation.** When Steam is newer than the published signatures, OpenSteamTool keeps working on the last build's signatures instead of disabling hooks (see [Steam version compatibility](#steam-version-compatibility)).
