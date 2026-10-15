@@ -75,9 +75,9 @@ body:
     attributes:
       label: Log files
       description: |
-        Debug builds write logs to `<Steam>/opensteamtool/*.log` (`main.log`, `ipc.log`, etc.).
+        Debug builds write logs to `<Steam>/OpenSteamTool/*.log` (`main.log`, `ipc.log`, etc.).
 
-        **Pack the whole `<Steam>/opensteamtool/` folder into an archive (`.zip`, `.tar.gz`, `.tgz`, `.gz`) and drag-and-drop it into this box.**
+        **Pack the whole `<Steam>/OpenSteamTool/` folder into an archive (`.zip`, `.tar.gz`, `.tgz`, `.gz`) and drag-and-drop it into this box.**
 
   - type: textarea
     id: lua
