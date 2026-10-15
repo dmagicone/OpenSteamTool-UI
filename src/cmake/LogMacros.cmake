@@ -35,7 +35,7 @@ endforeach()
 set(_new_content
 "// Auto-generated from LogModules.def -- DO NOT EDIT\n\
 #pragma once\n\n\
-#ifdef OPENSTEAMTOOL_LOGGING_ENABLED\n\n\
+#ifdef OpenSteamTool_LOGGING_ENABLED\n\n\
 ${_debug}\
 #else\n\n\
 ${_release}\
