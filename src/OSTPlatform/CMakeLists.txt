@@ -49,5 +49,5 @@ target_link_libraries(OSTPlatform PRIVATE
 
 # Logging is compiled in only for Debug; Release reduces OSTP_LOG_* to no-ops.
 target_compile_definitions(OSTPlatform PRIVATE
-    $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
+    $<$<CONFIG:Debug>:OpenSteamTool_LOGGING_ENABLED>
 )
