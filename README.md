@@ -1,87 +1,71 @@
 <div align="center">
-  <img src="docs/logo-animated.svg" width="180" alt="OpenSteamTool logo">
-
   <h1>OpenSteamTool</h1>
 
   <p>
-    <strong>Open-Source Steam Unlock Tool</strong>
+    <strong>Open-source Steam unlock tool that keeps up with Steam updates on its own</strong>
   </p>
 
   <p>
     <img src="https://img.shields.io/badge/C%2B%2B-20%2B-2ea44f?logo=cplusplus&logoColor=white" alt="C++ 20+">
     <img src="https://img.shields.io/badge/CMake-3.20%2B-2ea44f?logo=cmake&logoColor=white" alt="CMake 3.20+">
     <img src="https://img.shields.io/badge/Windows-only-d73a49?logo=windows&logoColor=white" alt="Windows only">
-    <a href="https://deepwiki.com/OpenSteam001/OpenSteamTool">
-      <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
-    </a>
-  </p>
-
-  <p>
-    <a href="README.md">
-      <img src="https://flagcdn.com/w40/us.png" width="22" alt="United States flag">
-      English
-    </a>
-    &nbsp;|&nbsp;
-    <a href="README_ES.md">
-      <img src="https://flagcdn.com/w40/es.png" width="22" alt="Spain flag">
-      Español
-    </a>
-    &nbsp;|&nbsp;
-    <a href="README_ZH.md">
-      <img src="https://flagcdn.com/w40/cn.png" width="22" alt="China flag">
-      中文
-    </a>
+    <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0">
   </p>
 </div>
 
-## Feature
+OpenSteamTool is a fork of [OpenSteamTool](https://github.com/OpenSteam001/OpenSteamTool). It adds:
 
-### Core Unlocks
+- **Self-maintained signatures.** [Smokestack](https://github.com/SvnFrs/smokestack) watches Valve's client releases and ports OpenSteamTool's hook signatures to each new build within hours, using [`tools/sigport`](tools/sigport).
+- **Graceful degradation.** When Steam is newer than the published signatures, OpenSteamTool keeps working on the last build's signatures instead of disabling hooks (see [Steam version compatibility](#steam-version-compatibility)).
+
+## Features
+
+### Core unlocks
 - Unlock an unlimited number of unowned games.
 - Unlock all DLCs for unowned games.
-- Support auto load depot decryption keys from Lua config.
-- Support auto manifest download via `opensteamtool` / `steamrun` / `wudrm` upstream APIs (default is `opensteamtool`), or a custom Lua endpoint (see [Manifest via Lua](#manifest-via-lua)).
-- Support downloading protected games or DLCs that require an access token.
-- Support binding manifest to prevent specific games from being updated.
+- Load depot decryption keys from Lua config automatically.
+- Download manifests automatically via the `opensteamtool` / `steamrun` / `wudrm` upstream APIs (default is `opensteamtool`), or a custom Lua endpoint (see [Manifest via Lua](#manifest-via-lua)).
+- Download protected games or DLCs that require an access token.
+- Bind a manifest to keep specific games from being updated.
 
-### Hot Reload
-- Adding, modifying, deleting, or overwriting `.lua` files in any watched directory automatically triggers a reload. No restart, no offline/online toggle needed.
+### Hot reload
+- Adding, modifying, deleting, or overwriting `.lua` files in any watched directory triggers a reload. No restart and no offline/online toggle needed.
 
 ### Injection
-- Add optional game-process library injection through `[inject]` in `opensteamtool.toml`.
-- Configure `enabled`, `library_x64`, and `library_x86`; the injected library must match the target process architecture.`library_x64` and `library_x86` may be absolute paths, or relative paths resolved from the Steam root directory.
+- Optional game-process library injection through `[inject]` in `OpenSteamTool.toml`.
+- Configure `enabled`, `library_x64`, and `library_x86`; the injected library must match the target process architecture. Paths may be absolute or relative to the Steam root directory.
 
 ### Family Sharing and Remote Play
-- Bypass Steam Family Sharing restrictions for games that have been added to the library with `addappid` in Lua. All accounts in the Steam Family that participate in sharing must use OpenSteamTool for this to work.
+- Bypass Steam Family Sharing restrictions for games added to the library with `addappid` in Lua. Every account in the Steam Family that shares must run OpenSteamTool (or OpenSteamTool).
 
-### Compatible with games protected by Denuvo and SteamStub
-- SteamStub-only games do not require configuring `AppTicket`. OpenSteamTool can reuse Steam's local ConfigStore ticket and forge the requested AppId through a SteamDRMP off-by-four ticket parsing vulnerability, without injecting into the game process.
-- Denuvo-protected games still require explicit ticket data. OpenSteamTool stores `AppTicket` and `ETicket` through the platform credential store.
-- Use `setAppTicket(appid, "hex")` and `setETicket(appid, "hex")` in Lua config to write these values to the platform credential store automatically.
-- Denuvo verification has a 30-minute validity window. After this window expires, authorization may fail with Denuvo error code `88500005`; refresh the ticket data before retrying.
-- AppTicket priority: explicit tickets have the highest priority, including tickets configured by `setAppTicket` and existing cached `AppTicket` credential values. If no explicit AppTicket is available, OpenSteamTool falls back to the forged local ConfigStore ticket path.
-- SteamID priority: read cached `SteamID` first; if missing, parse from explicit `AppTicket`. On Windows, the credential store backend currently uses `HKCU\Software\Valve\Steam\Apps\<AppId>`. The Linux backend is not implemented yet.
+### Games protected by Denuvo and SteamStub
+- SteamStub-only games need no `AppTicket`. OpenSteamTool reuses Steam's local ConfigStore ticket and forges the requested AppId through a SteamDRMP off-by-four ticket parsing vulnerability, without injecting into the game process.
+- Denuvo-protected games still need explicit ticket data. OpenSteamTool stores `AppTicket` and `ETicket` through the platform credential store.
+- Use `setAppTicket(appid, "hex")` and `setETicket(appid, "hex")` in Lua config to write these values to the credential store.
+- Denuvo verification has a 30-minute validity window. After it expires, authorization may fail with Denuvo error code `88500005`; refresh the ticket data before retrying.
+- AppTicket priority: explicit tickets come first (from `setAppTicket` or an existing cached `AppTicket`). Without one, OpenSteamTool falls back to the forged local ConfigStore ticket.
+- SteamID priority: the cached `SteamID` first; if missing, parsed from the explicit `AppTicket`. On Windows the credential store is `HKCU\Software\Valve\Steam\Apps\<AppId>`.
 
 #### Extracting tickets with `extract_tickets`
 
-The `extract_tickets` tool dumps the `AppTicket` and `ETicket` hex strings you need for `setAppTicket` / `setETicket`. Run it on a machine where Steam is running and logged into an account that **owns** the target game.
+`extract_tickets` dumps the `AppTicket` and `ETicket` hex strings needed for `setAppTicket` / `setETicket`. Run it on a machine where Steam is running and logged into an account that **owns** the game.
 
 1. Build the tools (see [Build](#build)); the binary lands in `build/tools/Release/extract_tickets.exe`.
-2. Run it with the target AppId (or run it with no argument and type the AppId when prompted):
+2. Run it with the target AppId (or with no argument, then type the AppId):
    ```powershell
    extract_tickets.exe 1361510
    ```
-3. It reads the Steam install path from the registry, loads `steamclient64.dll`, and writes everything into an `<appid>/` folder next to the executable:
-   - `appticket.bin` — raw app ownership ticket (binary)
-   - `eticket.bin` — raw encrypted app ticket (binary)
-   - `tickets.txt` — plain-text summary with the hex strings:
+3. It reads the Steam install path from the registry, loads `steamclient64.dll`, and writes an `<appid>/` folder next to the executable:
+   - `appticket.bin`: raw app ownership ticket
+   - `eticket.bin`: raw encrypted app ticket
+   - `tickets.txt`: the hex strings
      ```
      appid:1361510
      appticket(184 bytes):14000000...
      eticket(143 bytes):...
      ```
    A ticket that could not be obtained is reported as `appticket:null` / `eticket:null`.
-4. Paste the hex strings from `tickets.txt` into your Lua config:
+4. Paste the hex strings into your Lua config:
    ```lua
    setAppTicket(1361510, "14000000...")
    setETicket(1361510, "...")
@@ -89,50 +73,53 @@ The `extract_tickets` tool dumps the `AppTicket` and `ETicket` hex strings you n
 
 > **Note:** Tickets are only valid when extracted from an account that **genuinely owns** the game.
 
-### Stats and Achievements
-- Enable stats and achievements for unowned games.
-- Uses `setStat(appid, "steamid")` to configure which SteamID's achievement data to pull.
-- If no `setStat` is configured for an app, OpenSteamTool queries `https://stats.opensteamtool.com/{appid}` when `[stats] enable_api = true` (default).
-- Priority: `setStat` > stats API when enabled and valid > hardcoded preset SteamID `76561198028121353`.
+### Stats and achievements
+- Stats and achievements for unowned games.
+- `setStat(appid, "steamid")` chooses which SteamID's achievement data to pull.
+- Without `setStat`, OpenSteamTool queries `https://stats.opensteamtool.com/{appid}` when `[stats] enable_api = true` (default).
+- Priority: `setStat` > stats API (when enabled and valid) > preset SteamID `76561198028121353`.
 
-### Online Fix
-- Add `-onlinefix` to the Steam launch parameters to enable 480-based online play in games that use lobby matchmaking. The current limitation is that only one such game can run at a time.To revert, simply remove -onlinefix from the launch parameters — online play returns to normal on the next launch.
+### Cloud saves
+- Optional Steam Cloud save redirection for unlocked games through [CloudRedirect](https://github.com/Selectively11/CloudRedirect); enable it under `[cloud]` in `OpenSteamTool.toml`.
 
-## Future
-- Steam Cloud synchronization support.(This is a huge project)
+### Online fix
+- Add `-onlinefix` to Steam's launch parameters to enable 480-based online play in games that use lobby matchmaking. Only one such game can run at a time. Remove the parameter to go back to normal on the next launch.
 
 ## Usage
-1. Run `build.bat` from the project root to build the project.
-2. Copy generated `dwmapi.dll`, `xinput1_4.dll` and `OpenSteamTool.dll` to the Steam root directory.
-3. Create Lua directory (for example `C:\steam\config\lua`) and place Lua scripts there. The DLL will automatically load and execute them.
-4. Lua example:
+
+1. Download a release (or [build](#build) it) and copy `dwmapi.dll`, `xinput1_4.dll` and `OpenSteamTool.dll` to the Steam root directory.
+2. Create a Lua directory (for example `C:\steam\config\lua`) and put Lua scripts there. OpenSteamTool loads and runs them automatically.
+3. Lua example:
 ```lua
 addappid(1361510) -- unlock game with appid 1361510
 
-addappid(1361511, 0,"5954562e7f5260400040a818bc29b60b335bb690066ff767e20d145a3b6b4af0") -- unlock game with appid 1361511 depotKey is "5954562e7f5260400040a818bc29b60b335bb690066ff767e20d145a3b6b4af0" 
+addappid(1361511, 0,"5954562e7f5260400040a818bc29b60b335bb690066ff767e20d145a3b6b4af0") -- unlock appid 1361511 with depot key "5954...af0"
 
-addtoken(1361510,"2764735786934684318") -- add access token ("2764735786934684318") for game with appid 1361510 
--- No Longer Supported:
---pinApp(1361510) -- pin game with appid 1361510 to prevent it from being updated
+addtoken(1361510,"2764735786934684318") -- add access token for appid 1361510
 
-setManifestid(1361511,"5656605350306673283") -- pin depotid:1361511 manifest_gid:5656605350306673283, size defaults to 0
-setManifestid(1361511,"5656605350306673283", 12345678) -- same but with explicit size
+setManifestid(1361511,"5656605350306673283") -- pin depot 1361511 to manifest gid 5656605350306673283, size defaults to 0
+setManifestid(1361511,"5656605350306673283", 12345678) -- same with explicit size
 
-setAppTicket(1361510,"0100000000000000...") -- write AppTicket to the credential store; on Windows: HKCU\Software\Valve\Steam\Apps\1361510\AppTicket
+setAppTicket(1361510,"0100000000000000...") -- write AppTicket to HKCU\Software\Valve\Steam\Apps\1361510\AppTicket
 
-setETicket(1361510,"0100000000000000...") -- write ETicket to the credential store; on Windows: HKCU\Software\Valve\Steam\Apps\1361510\ETicket
+setETicket(1361510,"0100000000000000...") -- write ETicket to HKCU\Software\Valve\Steam\Apps\1361510\ETicket
 
-setStat(1361510, "76561197960287930") -- use the specified SteamID's achievement data for appid 1361510
--- If not configured, the stats API is used when enabled; otherwise default SteamID 76561198028121353 is used.
+setStat(1361510, "76561197960287930") -- use this SteamID's achievement data for appid 1361510
 ```
 
-All function names are **case-insensitive**. `setAppTicket`, `setappticket`, `SetAppticket`, `SETAPPTICKET` etc. are all equivalent. The same applies to every registered function (`addAppId`, `AddToken`, `SETManifestid`, etc.).
+All function names are **case-insensitive**: `setAppTicket`, `setappticket` and `SETAPPTICKET` are equivalent, and the same goes for every registered function.
+
+### Upgrading from OpenSteamTool
+
+Replace `dwmapi.dll` and `xinput1_4.dll` with OpenSteamTool's, add `OpenSteamTool.dll`, and delete `OpenSteamTool.dll`. Nothing else is needed:
+
+- An existing `<Steam>/opensteamtool.toml` is still read while there is no `OpenSteamTool.toml`.
+- The `<Steam>/opensteamtool/` folder (logs, signature cache) is moved to `<Steam>/OpenSteamTool/` on first start.
 
 ### Configuration (optional)
 
-Rename `opensteamtool.example.toml` to `opensteamtool.toml` and place it in the Steam root directory (next to `steam.exe`).
-If no config file is found, built-in defaults are used — no auto-creation.
-The file is watched while Steam is running; valid changes are hot-reloaded without restarting Steam.
+Copy `OpenSteamTool.example.toml` to `OpenSteamTool.toml` in the Steam root directory (next to `steam.exe`).
+Without a config file, built-in defaults are used. The file is watched while Steam runs; valid changes are hot-reloaded.
 
 ```toml
 [log]
@@ -151,40 +138,36 @@ timeout_recv_ms    = 10000
 
 [stats]
 # Query https://stats.opensteamtool.com/{appid} when no Lua setStat override exists.
-# Priority: setStat > stats API > hardcoded preset SteamID.
 enable_api = true
 
-# Additional Lua config directories (optional).
-# Files are loaded after the default <Steam>/config/lua folder.
-# The default folder is always loaded last so user files take priority.
+# Additional Lua config directories (optional), loaded before <Steam>/config/lua
+# so files in the default folder take priority.
 [lua]
 paths = []
 
 [inject]
-# Optional library injection into game processes.
-# The injected library must match the target process architecture.
 enabled = false
-# library_x64 = "OpenSteamTool.GameHook.x64.dll"
-# library_x86 = "OpenSteamTool.GameHook.x86.dll"
+# library_x64 = "GameHook.x64.dll"
+# library_x86 = "GameHook.x86.dll"
 
-# Optional metadata mirror. See "Steam version compatibility" below.
+[cloud]
+enabled = false
+
+# Optional signature mirror. See "Steam version compatibility" below.
 [remote]
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
 ```
+
+The `opensteamtool` manifest provider and the stats API are services run by the OpenSteamTool project. OpenSteamTool uses them as-is.
 
 ### Manifest via Lua
 
 Two manifest code functions are supported:
 
-#### `fetch_manifest_code(gid)`
+- `fetch_manifest_code(gid)`: receives only the manifest GID.
+- `fetch_manifest_code_ex(app_id, depot_id, gid)` *(recommended)*: also receives the app and depot IDs, for endpoints that need them.
 
-Basic function that receives only the manifest GID.
-
-#### `fetch_manifest_code_ex(app_id, depot_id, gid)` *(recommended)*
-
-Extended function that receives `app_id`, `depot_id`, and `gid`. Allows constructing API endpoints that require app identification.
-
-The C++ runtime provides two Lua helpers:
+The runtime provides two Lua helpers:
 
 | Function | Signature | Returns |
 |----------|-----------|---------|
@@ -195,48 +178,41 @@ The C++ runtime provides two Lua helpers:
 
 ### Steam version compatibility
 
-OpenSteamTool no longer ships byte-pattern signatures inside the DLL. Instead, on each launch it computes the SHA-256 of `steamclient64.dll` and `steamui.dll` on disk and looks up a matching pattern file from the upstream tracker at [`OpenSteam001/steam-monitor`](https://github.com/OpenSteam001/steam-monitor) (`pattern` branch).
+OpenSteamTool doesn't compile hook locations into the DLL. On each launch it hashes `steamclient64.dll` and `steamui.dll` (SHA-256) and loads the matching files from [Smokestack](https://github.com/SvnFrs/smokestack):
 
-Lookup order (every launch):
+1. **GitHub raw**: `https://raw.githubusercontent.com/SvnFrs/smokestack/{pattern|ipc}/...`
+2. **jsDelivr**: automatic fallback when GitHub raw is unreachable (useful where `raw.githubusercontent.com` is blocked).
+3. **Local cache**: `<Steam>\OpenSteamTool\{pattern|ipc}\<component>\<sha256>.toml`, used when both are unreachable. It's rewritten after every successful fetch.
+4. **Last known build**: if no file exists for this build yet (Steam updated in the last few hours), OpenSteamTool uses the newest cached file from an earlier build. Hooks resolve by signature, and a signature is trusted only if it matches exactly once in the new binary. Functions that can't be found that way are listed in a popup; everything else keeps working.
 
-1. **GitHub raw** — `https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern/...`. Canonical source.
-2. **jsDelivr CDN** — automatic fallback if GitHub raw is unreachable (connection refused / timeout / 5xx). No configuration required. Useful in regions where `raw.githubusercontent.com` is blocked but jsDelivr is reachable (e.g. mainland China).
-3. **Local cache** — `<Steam>\opensteamtool\pattern\<subdir>\<sha256>.toml`. Used **only** when remote is unreachable. The cache is overwritten after every successful remote fetch.
+Smokestack's job checks Valve's stable and beta client manifests every three hours. When a build appears, it ports every function, grades how confident each match is, and opens an issue if any function needs a human look. See [`tools/sigport`](tools/sigport) for how matching works.
 
-Remote is consulted on every launch so users automatically pick up upstream re-publications (e.g. the bot adding a new signature, or fixing an existing one) without having to clear any cache.
-
-If a step returns **HTTP 404** the mirror loop stops immediately — all mirrors serve the same content, so a 404 means the upstream bot has not yet published a TOML for this Steam build. The code then falls back to the local cache if one exists; otherwise a one-shot popup appears with the unmatched DLL name, its SHA-256, the expected cache path, and the upstream URL. Only the hooks tied to that DLL are disabled — the rest of OpenSteamTool keeps working.
-
-You can also drop a pattern TOML into the cache directory manually if you know the layout for a given build; the file name must be `<sha256>.toml`. The cache fallback will pick it up the next time remote is unreachable.
-
-> A short outbound HTTPS request is performed at every launch (one per DLL: `steamclient64.dll`, `steamui.dll`). The downloaded bodies are tiny (~10 KB each) and the work runs on a worker thread, so it never blocks Steam's loader.
+You can also drop a TOML into the cache directory by hand; the file name must be `<sha256>.toml`.
 
 #### Using a different mirror
 
-For most users, the built-in **GitHub -> jsDelivr** fallback is enough. To use a private mirror or intranet server, configure a full URL template. A custom mirror replaces the built-in remote sources; local cache fallback remains available.
-
-The template must include `{channel}`, `{component}`, and `{sha256}`. Channels currently used are `pattern` and `ipc`.
+To use a private mirror, set a URL template containing `{channel}`, `{component}` and `{sha256}`. It replaces the built-in sources; the local cache still applies.
 
 ```toml
 [remote]
 url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/SvnFrs/smokestack@{channel}/{component}/{sha256}.toml"
 ```
 
 ### Debug logging
 
-Debug builds write per-module log files under `<Steam>/opensteamtool/`:
+Debug builds write per-module logs under `<Steam>/OpenSteamTool/`:
 
 | File | Source | Content |
 |------|--------|---------|
-| `main.log`          | General | Init, config loading, Lua parsing, utilities |
+| `main.log`          | General | Init, config loading, Lua parsing, signature loading |
 | `ipc.log`           | `LOG_IPC_*` | IPC commands, InterfaceCall dispatch, spoofing |
 | `netpacket.log`     | `LOG_NETPACKET_*` | Network packet send/recv, eMsg dispatch |
 | `manifest.log`      | `LOG_MANIFEST_*` | Manifest download, `fetch_manifest_code`, manifest binding |
 | `decryptionkey.log` | `LOG_DECRYPTIONKEY_*` | Depot decryption key injection |
 | `keyvalue.log`      | `LOG_KEYVALUE_*` | KeyValues patching (manifest binding) |
 | `misc.log`          | `LOG_MISC_*` | Engine pointer capture, AppId hints |
-| `achievement.log`   | `LOG_ACHIEVEMENT_*` | UserStats requests/responses, steamid spoofing |
+| `achievement.log`   | `LOG_ACHIEVEMENT_*` | UserStats requests/responses, SteamID spoofing |
 | `pics.log`          | `LOG_PICS_*` | PICS access token injection |
 | `package.log`       | `LOG_PACKAGE_*` | Package injection, FileWatcher events |
 | `onlinefix.log`     | `LOG_ONLINEFIX_*` | Online fix (480 AppId spoofing) |
@@ -245,17 +221,15 @@ Debug builds write per-module log files under `<Steam>/opensteamtool/`:
 | `pipe.log`          | `LOG_PIPE_*` | Pipe handshakes, process inspection, Denuvo authorization, library injection |
 | `platform.log`      | `LOG_PLATFORM_*` | Platform helper diagnostics, including remote-process operations |
 
-The log level is controlled by `[log] level` in `opensteamtool.toml`.
+The level is set by `[log] level` in `OpenSteamTool.toml`.
 
 ## Build
 
 ### Requirements
 - Windows 10/11
-- CMake 3.20+
-- Visual Studio 2022 with MSVC (x64 toolchain)
-
-### Runtime requirements
-- Outbound HTTPS access to `raw.githubusercontent.com` on first launch after a Steam update (see [Steam version compatibility](#steam-version-compatibility)). Cached afterwards.
+- CMake 3.20+ (Ninja recommended)
+- Visual Studio 2022 or Build Tools 2022 with the C++ workload (x64)
+- [Bun](https://bun.sh) 1.3+, only for working on `tools/sigport`
 
 ### Quick build
 ```powershell
@@ -265,6 +239,10 @@ build.bat
 ### Output
 - Debug: `build/Debug/OpenSteamTool.dll`, `build/Debug/dwmapi.dll`, `build/Debug/xinput1_4.dll`
 - Release: `build/Release/OpenSteamTool.dll`, `build/Release/dwmapi.dll`, `build/Release/xinput1_4.dll`
+
+## Credits and license
+
+OpenSteamTool is a fork of [OpenSteamTool](https://github.com/OpenSteam001/OpenSteamTool) by OpenSteam001 and contributors, and like it is licensed under the [GPL-3.0](LICENSE).
 
 ## Disclaimer
 This project is provided for research and educational purposes only. You are responsible for complying with local laws, platform terms of service, and software licenses.
