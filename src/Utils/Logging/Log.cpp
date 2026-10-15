@@ -1,10 +1,12 @@
 #include "Log.h"
 
-#ifdef OPENSTEAMTOOL_LOGGING_ENABLED
+#ifdef OpenSteamTool_LOGGING_ENABLED
 
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Log.h"
 #include "Utils/Config/Config.h"
+#include "Utils/Config/Paths.h"
+#include "Branding.h"
 #include <atomic>
 #include <filesystem>
 #include <string>
@@ -78,9 +80,13 @@ namespace Log {
         if (!g_mainReady.compare_exchange_strong(expected, true)) return;
 
         try {
-            auto dir = OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule);
-            if (dir.empty()) dir = ".";
-            auto logDir = (dir / "opensteamtool").string();
+            std::filesystem::path logPath = Paths::DataDir();
+            if (logPath.empty()) {
+                auto dir = OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule);
+                if (dir.empty()) dir = ".";
+                logPath = dir / Branding::kDataDirName;
+            }
+            auto logDir = logPath.string();
             std::filesystem::create_directories(logDir);
             Main = MakeLogger(logDir, "main");
             Main->set_level(spdlog::level::trace);  // early boot: log everything
@@ -132,4 +138,4 @@ namespace Log {
 
 }
 
-#endif  // OPENSTEAMTOOL_LOGGING_ENABLED
+#endif  // OpenSteamTool_LOGGING_ENABLED

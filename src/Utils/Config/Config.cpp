@@ -1,4 +1,6 @@
 #include "Config.h"
+#include "Paths.h"
+#include "Branding.h"
 #include "Utils/Logging/Log.h"
 #include "Utils/SteamMetadata/ManifestClient.h"
 
@@ -38,8 +40,10 @@ namespace {
 
     Snapshot MakeDefaultSnapshot(const std::string& configPath) {
         Snapshot snapshot;
-        std::filesystem::path p(configPath);
-        snapshot.logDir = (p.parent_path() / "opensteamtool").string();
+        const std::filesystem::path& dataDir = Paths::DataDir();
+        snapshot.logDir = dataDir.empty()
+            ? (std::filesystem::path(configPath).parent_path() / Branding::kDataDirName).string()
+            : dataDir.string();
         return snapshot;
     }
 

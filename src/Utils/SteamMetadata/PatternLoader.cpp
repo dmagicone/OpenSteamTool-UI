@@ -1,4 +1,5 @@
 #include "PatternLoader.h"
+#include "Branding.h"
 #include "OSTPlatform/include/Memory.h"
 #include "OSTPlatform/include/Numbers.h"
 #include "Utils/Logging/Log.h"
@@ -6,6 +7,7 @@
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 #include "Utils/Support/FnvHash.h"
 
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
@@ -42,6 +44,12 @@ static std::unordered_map<OSTPlatform::DynamicLibrary::ModuleHandle, PatternMap>
 // popup with a second popup listing every dependent hook.
 static std::unordered_set<OSTPlatform::DynamicLibrary::ModuleHandle> g_failedModules;
 
+// Modules running on another build's pattern file (no file exists for the
+// running build). Their RVAs are meaningless here, so FindPattern resolves by
+// signature only and accepts a signature only when it matches exactly once —
+// a first-of-many match could be a different function in this build.
+static std::unordered_set<OSTPlatform::DynamicLibrary::ModuleHandle> g_fallbackModules;
+
 // functions whose names were not found during FindPattern
 static std::vector<std::string> g_missingFunctions;
 
@@ -75,10 +83,14 @@ static bool ParseSig(const std::string& str,
     return !bytes.empty();
 }
 
+// Returns the first match; *outMatches (when given) receives the number of
+// matches, counting at most 2 — enough to tell unique from ambiguous.
 static void* ScanModule(OSTPlatform::DynamicLibrary::ModuleHandle module,
                         const std::vector<uint8_t>& bytes,
-                        const std::vector<uint8_t>& mask)
+                        const std::vector<uint8_t>& mask,
+                        int* outMatches = nullptr)
 {
+    if (outMatches) *outMatches = 0;
     const auto image = OSTPlatform::Memory::GetModuleImage(module);
     if (!image) return nullptr;
 
@@ -87,14 +99,30 @@ static void* ScanModule(OSTPlatform::DynamicLibrary::ModuleHandle module,
     size_t patLen = bytes.size();
     if (size < patLen) return nullptr;
 
-    for (size_t i = 0; i <= size - patLen; ++i) {
+    // Jump between occurrences of the first concrete byte with memchr instead
+    // of testing every offset.
+    size_t anchor = 0;
+    while (anchor < patLen && !mask[anchor]) ++anchor;
+    if (anchor == patLen) return nullptr;   // all wildcards: matches anything
+
+    void* first = nullptr;
+    int matches = 0;
+    const size_t last = size - patLen;   // last valid start offset
+    for (size_t i = 0; i <= last; ++i) {
+        const void* hit = std::memchr(base + i + anchor, bytes[anchor], last - i + 1);
+        if (!hit) break;
+        i = static_cast<size_t>(static_cast<const uint8_t*>(hit) - base) - anchor;
+
         bool found = true;
         for (size_t j = 0; j < patLen; ++j) {
             if (mask[j] && base[i + j] != bytes[j]) { found = false; break; }
         }
-        if (found) return base + i;
+        if (!found) continue;
+        if (!first) first = base + i;
+        if (++matches == 2 || !outMatches) break;
     }
-    return nullptr;
+    if (outMatches) *outMatches = matches;
+    return first;
 }
 
 // ---- TOML pattern parser ----
@@ -148,19 +176,39 @@ static void ShowDownloadFailedPopup(const std::string& dllName,
                                     const std::string& sha256,
                                     const std::string& component)
 {
+    const std::string product = Branding::kProductName;
     SteamDiagnostics::ShowWarning(
-        "OpenSteamTool - Unsupported Steam Version",
-        "OpenSteamTool: signature file not found for " + dllName + ".\n\n"
+        product + " - Unsupported Steam Version",
+        product + ": signature file not found for " + dllName + ".\n\n"
         "Hooks that depend on " + dllName + " are disabled for this session; "
         "other modules are unaffected.\n\n"
         "You can:\n"
         "  1. Wait for the next signature update, then restart Steam.\n"
         "  2. Drop a matching TOML at:\n"
-        "       <Steam>\\opensteamtool\\pattern\\" + component + "\\" + sha256 + ".toml\n"
-        "  3. Check upstream:\n"
-        "       https://github.com/OpenSteam001/steam-monitor/tree/pattern/" + component + "\n"
+        "       <Steam>\\" + Branding::kDataDirName + "\\pattern\\" + component + "\\" + sha256 + ".toml\n"
+        "  3. Check the signature repository:\n"
+        "       " + Branding::kSignaturesRepoUrl + "/tree/pattern/" + component + "\n"
         "  4. Report the diagnostics below:\n"
-        "       https://github.com/OpenSteam001/OpenSteamTool/issues");
+        "       " + Branding::kIssuesUrl);
+}
+
+// No file for the running build: try the newest one cached for another build.
+static bool LoadFallback(OSTPlatform::DynamicLibrary::ModuleHandle module,
+                         const RemoteToml::Request& request,
+                         const std::string& runningSha256)
+{
+    RemoteToml::Result r = RemoteToml::FetchNewestCached(request, runningSha256);
+    if (!r.ok) return false;
+
+    PatternMap map = ParsePatternString(r.body);
+    if (map.empty()) return false;
+    for (auto& [key, entry] : map) entry.rva = 0;   // offsets of the other build
+
+    LOG_WARN("PatternLoader: no signature file for this {} build; resolving {} signatures "
+             "from build {} (unique matches only)", request.component, map.size(), r.sha256);
+    g_moduleMaps[module] = std::move(map);
+    g_fallbackModules.insert(module);
+    return true;
 }
 
 } // namespace
@@ -176,11 +224,8 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
     namespace fs = std::filesystem;
 
     // Delegate fetch + cache + mirror fallback to RemoteToml.
-    RemoteToml::Result r = RemoteToml::Fetch({
-        kPatternChannel,
-        component,
-        dllPath,
-    });
+    const RemoteToml::Request request{kPatternChannel, component, dllPath};
+    RemoteToml::Result r = RemoteToml::Fetch(request);
 
     if (r.ok) {
         std::string parseErr;
@@ -193,6 +238,12 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
         }
         LOG_WARN("PatternLoader: TOML for {} parsed empty ({})",
                  component, parseErr.empty() ? "no entries" : parseErr);
+    }
+
+    // Steam updated past the published files: keep working on signatures from
+    // the last build we have, and only surface functions that don't resolve.
+    if (!r.sha256.empty() && LoadFallback(module, request, r.sha256)) {
+        return true;
     }
 
     // Total failure — popup + disable module's hooks.
@@ -246,16 +297,22 @@ void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* 
     if (!entry.sig.empty()) {
         std::vector<uint8_t> bytes, mask;
         if (ParseSig(entry.sig, bytes, mask)) {
-            void* addr = ScanModule(module, bytes, mask);
-            if (addr) {
+            const bool requireUnique = g_fallbackModules.count(module) != 0;
+            int matches = 0;
+            void* addr = ScanModule(module, bytes, mask, requireUnique ? &matches : nullptr);
+            if (!addr) {
+                LOG_WARN("PatternLoader: sig scan miss for '{}' (pattern parsed OK, "
+                         "no match in module image)", funcName);
+            } else if (requireUnique && matches > 1) {
+                LOG_WARN("PatternLoader: sig for '{}' matches more than once; "
+                         "not trusted without a file for this build", funcName);
+            } else {
                 uintptr_t rva = reinterpret_cast<uintptr_t>(addr) -
                                 reinterpret_cast<uintptr_t>(module);
                 LOG_DEBUG("PatternLoader: {} resolved via sig @ RVA 0x{:X}",
                           funcName, rva);
                 return addr;
             }
-            LOG_WARN("PatternLoader: sig scan miss for '{}' (pattern parsed OK, "
-                     "no match in module image)", funcName);
         } else {
             LOG_WARN("PatternLoader: malformed sig for '{}': '{}'",
                      funcName, entry.sig);
@@ -278,14 +335,15 @@ void ReportMissingFunctions()
         list += "  - " + name + "\n";
     g_missingFunctions.clear();
 
+    const std::string product = Branding::kProductName;
     SteamDiagnostics::ShowWarning(
-        "OpenSteamTool - Missing Signatures",
-        "OpenSteamTool: some functions could not be located.\n\n"
+        product + " - Missing Signatures",
+        product + ": some functions could not be located.\n\n"
         "The following functions were not found in the signature file:\n" +
         list +
         "\nHooks for these functions are disabled for this session.\n\n"
-        "Please report this at:\n"
-        "https://github.com/OpenSteam001/OpenSteamTool/issues");
+        "Please report this at:\n" +
+        Branding::kIssuesUrl);
 }
 
 } // namespace PatternLoader

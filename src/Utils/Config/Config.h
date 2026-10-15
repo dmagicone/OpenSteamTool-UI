@@ -51,7 +51,7 @@ namespace Config {
     // [log]
     inline LogLevel logLevel = LogLevel::Debug;
 
-    // derived from configPath: <steam>/opensteamtool/
+    // the data dir, <steam>/OpenSteamTool/ (see Paths::DataDir)
     inline std::string logDir;
 
     // [lua]

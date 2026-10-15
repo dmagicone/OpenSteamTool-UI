@@ -1,4 +1,5 @@
 #include "IPCLoader.h"
+#include "Branding.h"
 #include "IPCMessages.gen.h"
 #include "OSTPlatform/include/Numbers.h"
 #include "Utils/Logging/Log.h"
@@ -138,17 +139,18 @@ namespace {
 
     static void ShowMissingPopup(const std::string& sha256)
     {
+        const std::string product = Branding::kProductName;
         SteamDiagnostics::ShowWarning(
-            "OpenSteamTool - IPC spec missing",
-            "OpenSteamTool: IPC spec file not found.\n\n"
+            product + " - IPC spec missing",
+            product + ": IPC spec file not found.\n\n"
             "IPC interception is disabled for this session; pattern-based "
             "hooks are unaffected.\n\n"
             "You can:\n"
-            "  1. Wait for the next upstream publish and restart Steam.\n"
+            "  1. Wait for the next signature update and restart Steam.\n"
             "  2. Drop a matching TOML at:\n"
-            "       <Steam>\\opensteamtool\\ipc\\steamclient\\" + sha256 + ".toml\n"
-            "  3. Check upstream:\n"
-            "       https://github.com/OpenSteam001/steam-monitor/tree/ipc/steamclient");
+            "       <Steam>\\" + Branding::kDataDirName + "\\ipc\\steamclient\\" + sha256 + ".toml\n"
+            "  3. Check the signature repository:\n"
+            "       " + Branding::kSignaturesRepoUrl + "/tree/ipc/steamclient");
     }
 
 } // namespace
@@ -159,14 +161,24 @@ bool Load(const std::string& steamclientPath)
 {
     g_registry.Clear();
 
-    RemoteToml::Result r = RemoteToml::Fetch({
-        kIPCChannel,
-        "steamclient",
-        steamclientPath,
-    });
+    const RemoteToml::Request request{kIPCChannel, "steamclient", steamclientPath};
+    RemoteToml::Result r = RemoteToml::Fetch(request);
+    const std::string runningSha = r.sha256;
+
+    // funcHash/fencepost/argc describe a method's signature, not the build,
+    // so another build's spec stays valid for every method that didn't change
+    // (a changed method gets a new funcHash and simply never matches).
+    bool fallback = false;
+    if (!r.ok && !runningSha.empty()) {
+        RemoteToml::Result other = RemoteToml::FetchNewestCached(request, runningSha);
+        if (other.ok) {
+            r = std::move(other);
+            fallback = true;
+        }
+    }
 
     if (!r.ok) {
-        ShowMissingPopup(r.sha256.empty() ? "(hash failed)" : r.sha256);
+        ShowMissingPopup(runningSha.empty() ? "(hash failed)" : runningSha);
         return false;
     }
 
@@ -175,7 +187,7 @@ bool Load(const std::string& steamclientPath)
         root = toml::parse(r.body);
     } catch (const toml::parse_error& e) {
         LOG_WARN("IPCLoader: TOML parse error: {}", e.description());
-        ShowMissingPopup(r.sha256);
+        ShowMissingPopup(runningSha);
         return false;
     }
 
@@ -183,13 +195,15 @@ bool Load(const std::string& steamclientPath)
         if (!val.is_table()) continue;
         Interface iface;
         if (!ParseInterfaceTable(key.str(), *val.as_table(), iface)) continue;
+        if (fallback) iface.vtableRva = 0;   // belongs to the other build
 
         g_registry.Add(std::move(iface));
     }
 
     LOG_INFO("IPCLoader: loaded {} methods across {} interfaces ({})",
              MethodCount(), InterfaceCount(),
-             r.fromCache ? "cache fallback" : "remote");
+             fallback ? "spec of build " + r.sha256 + ", none for this build"
+                      : r.fromCache ? "cache fallback" : "remote");
     return true;
 }
 
