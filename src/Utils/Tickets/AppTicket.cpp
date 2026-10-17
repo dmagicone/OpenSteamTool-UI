@@ -1,47 +1,55 @@
 #include "AppTicket.h"
-#include "Hook/Hooks_Decryption.h"
-#include "OSTPlatform/include/SteamCredentialStore.h"
-#include "Utils/Config/LuaConfig.h"
 #include "Utils/Logging/Log.h"
 
+#include <atomic>
+#include <cstring>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+
 namespace AppTicket {
-    constexpr AppId_t kLocalAppTicketSourceAppId = 7;
-    constexpr size_t kSteamIdTicketMinimumSize = 16;
+    namespace {
+        constexpr AppId_t kLocalAppTicketSourceAppId = 7;
 
-    static uint64_t GetSteamIDFromCredentialStore(AppId_t appId) {
-        uint64_t steamId = 0;
-        const auto status = OSTPlatform::SteamCredentialStore::GetSteamId(appId, steamId);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_TRACE("GetSpoofSteamID for AppId {}: SteamID unavailable in credential store ({})",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
-            return 0;
-        }
+        struct AppTicketEntry {
+            std::vector<uint8_t> appTicket;
+            std::vector<uint8_t> eTicket;
+        };
 
-        LOG_DEBUG("GetSpoofSteamID for AppId {}: SteamID credential -> 0x{:X}({})", appId, steamId, steamId);
-        return steamId;
+        std::atomic<SourceTicketProvider> g_sourceTicketProvider{nullptr};
+        std::shared_mutex g_ticketMutex;
+        std::unordered_map<AppId_t, AppTicketEntry> g_tickets;
+    } // namespace
+
+    void SetSourceTicketProvider(SourceTicketProvider provider) noexcept {
+        g_sourceTicketProvider.store(provider, std::memory_order_release);
     }
 
-    std::vector<uint8_t> GetAppOwnershipTicketFromCredentialStore(AppId_t appId) {
-        // exclude those appids that are not in addappid
-        if (!LuaConfig::HasDepot(appId)) {
-            LOG_DEBUG("GetAppOwnershipTicketFromCredentialStore for AppId {}: not in addappid, skip", appId);
-            return {};
+    std::vector<uint8_t> GetSteamConfigStoreTicket(AppId_t appId) {
+        if (appId == 0) return {};
+        if (auto provider = g_sourceTicketProvider.load(std::memory_order_acquire)) {
+            return provider(appId);
         }
-        std::vector<uint8_t> ticket;
-        const auto status = OSTPlatform::SteamCredentialStore::GetAppTicket(appId, ticket);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_TRACE("Read App Ownership Ticket for AppId {}: cached credential unavailable ({})",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
-            return {};
-        }
+        return {};
+    }
 
-        LOG_INFO("Successfully retrieved App Ownership Ticket from credential store, AppId: {}, Ticket Size: {}", appId, ticket.size());
-        return ticket;
+    std::vector<uint8_t> GetCachedAppOwnershipTicket(AppId_t appId) {
+        if (appId == 0) return {};
+        std::shared_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        if (it != g_tickets.end() && !it->second.appTicket.empty()) {
+            LOG_INFO("Successfully retrieved App Ownership Ticket, AppId: {}, Ticket Size: {}",
+                     appId, it->second.appTicket.size());
+            return it->second.appTicket;
+        }
+        LOG_TRACE("Read App Ownership Ticket for AppId {}: ticket unavailable", appId);
+        return {};
     }
 
     // Exploit steamdrmp's off-by-four ticket parsing vulnerability:
     static std::vector<uint8_t> ForgeLocalAppOwnershipTicket(AppId_t appId) {
-        std::vector<uint8_t> source = Hooks_Decryption::GetCacheAppOwnershipTicket(kLocalAppTicketSourceAppId);
+        if (appId == 0) return {};
+        std::vector<uint8_t> source = GetSteamConfigStoreTicket(kLocalAppTicketSourceAppId);
         if (source.size() <= kAppTicketSignatureSize) {
             LOG_DEBUG("ForgeLocalAppOwnershipTicket for AppId {}: no source appticket", appId);
             return {};
@@ -63,20 +71,28 @@ namespace AppTicket {
 
     bool GetAppOwnershipTicket(AppId_t appId, AppOwnershipTicket& ticket, AppTicketSource source) {
         ticket = {};
+        if (appId == 0) return false;
         
-        if (source == AppTicketSource::CredentialStoreOnly || source == AppTicketSource::CredentialStoreThenForge) {
-            ticket.data = GetAppOwnershipTicketFromCredentialStore(appId);
-            if (!ticket.data.empty() && ticket.data.size() >= sizeof(uint32)) {
+        if (source == AppTicketSource::MemoryOnly || source == AppTicketSource::MemoryThenForge) {
+            ticket.data = GetCachedAppOwnershipTicket(appId);
+            if (!ticket.data.empty() && ticket.data.size() >= kSteamIdTicketMinimumSize) {
                 ticket.totalSize = static_cast<uint32>(ticket.data.size());
                 ticket.appIdOffset = kAppTicketAppIdOffset;
                 ticket.steamIdOffset = kAppTicketSteamIdOffset;
-                ticket.signatureOffset = *reinterpret_cast<const uint32*>(ticket.data.data());
+                std::memcpy(&ticket.signatureOffset, ticket.data.data(), sizeof(uint32));
                 ticket.signatureSize = kAppTicketSignatureSize;
+                if (ticket.signatureOffset > ticket.totalSize ||
+                    ticket.signatureSize > (ticket.totalSize - ticket.signatureOffset) ||
+                    (ticket.appIdOffset + sizeof(AppId_t)) > ticket.totalSize) {
+                    LOG_WARN("AppTicket: corrupted signature or layout bounds for appId={}, sigOffset={}, sigSize={}, totalSize={}",
+                             appId, ticket.signatureOffset, ticket.signatureSize, ticket.totalSize);
+                    return false;
+                }
                 return true;
             }
         }
 
-        if (source == AppTicketSource::CredentialStoreOnly) return false;
+        if (source == AppTicketSource::MemoryOnly) return false;
 
         ticket.data = ForgeLocalAppOwnershipTicket(appId);
         if (ticket.data.empty()) return false;
@@ -89,83 +105,137 @@ namespace AppTicket {
         return true;
     }
 
-    std::vector<uint8_t> GetEncryptedTicketFromCredentialStore(AppId_t appId) {
-        LOG_DEBUG("appid={}", appId);    
-        // exclude those appids that are not in addappid
-        if (!LuaConfig::HasDepot(appId)) {
-            LOG_DEBUG("GetEncryptedTicketFromCredentialStore for AppId {}: not in addappid, skip", appId);
-            return {};
+    std::vector<uint8_t> GetCachedEncryptedTicket(AppId_t appId) {
+        if (appId == 0) return {};
+        std::shared_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        if (it != g_tickets.end() && !it->second.eTicket.empty()) {
+            LOG_INFO("Successfully retrieved Encrypted App Ticket, AppId: {}, Ticket Size: {}",
+                     appId, it->second.eTicket.size());
+            return it->second.eTicket;
         }
-        std::vector<uint8_t> ticket;
-        const auto status = OSTPlatform::SteamCredentialStore::GetETicket(appId, ticket);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_TRACE("Read Encrypted App Ticket for AppId {}: cached credential unavailable ({})",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
-            return {};
-        }
-
-        LOG_INFO("Successfully retrieved Encrypted App Ticket from credential store, AppId: {}, Ticket Size: {}", appId, ticket.size());
-        return ticket;
+        LOG_TRACE("Read Encrypted App Ticket for AppId {}: ticket unavailable", appId);
+        return {};
     }
 
-    bool WriteAppOwnershipTicket(AppId_t appId, const std::vector<uint8_t>& data) {
-        // we can't execlude appids here 
-        const auto status = OSTPlatform::SteamCredentialStore::WriteAppTicket(appId, data);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_ERROR("Failed to write AppTicket for AppId {} to credential store: {}",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
+    bool HasCachedEncryptedTicket(AppId_t appId) {
+        if (appId == 0) return false;
+        std::shared_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        return it != g_tickets.end() && !it->second.eTicket.empty();
+    }
+
+    bool WriteAppOwnershipTicket(AppId_t appId, std::span<const uint8_t> data) {
+        if (appId == 0 || data.size() < kSteamIdTicketMinimumSize) {
+            LOG_WARN("WriteAppOwnershipTicket: invalid parameters (appId={}, size={})", appId, data.size());
             return false;
         }
 
+        // Fast-path: if the identical ticket is already cached in memory, skip redundant write
+        {
+            std::shared_lock lock(g_ticketMutex);
+            auto it = g_tickets.find(appId);
+            if (it != g_tickets.end() &&
+                it->second.appTicket.size() == data.size() &&
+                std::memcmp(it->second.appTicket.data(), data.data(), data.size()) == 0) {
+                LOG_DEBUG("WriteAppOwnershipTicket: AppId {} ticket already up-to-date, skipping redundant write", appId);
+                return true;
+            }
+        }
+
+        {
+            std::unique_lock lock(g_ticketMutex);
+            auto& entry = g_tickets[appId];
+            entry.appTicket.assign(data.begin(), data.end());
+        }
         LOG_INFO("Wrote AppTicket for AppId {} ({} bytes)", appId, data.size());
         return true;
     }
 
-    bool WriteEncryptedTicket(AppId_t appId, const std::vector<uint8_t>& data) {
-        // we can't execlude appids here 
-        const auto status = OSTPlatform::SteamCredentialStore::WriteETicket(appId, data);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_ERROR("Failed to write ETicket for AppId {} to credential store: {}",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
-            return false;
+    bool WriteAppOwnershipTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+        return WriteAppOwnershipTicket(appId, std::span<const uint8_t>(data));
+    }
+
+    bool RemoveAppOwnershipTicket(AppId_t appId) {
+        if (appId == 0) return false;
+
+        std::unique_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        if (it != g_tickets.end()) {
+            it->second.appTicket.clear();
+        }
+        return true;
+    }
+
+    bool WriteEncryptedTicket(AppId_t appId, std::span<const uint8_t> data) {
+        if (appId == 0 || data.empty()) return false;
+
+        // Fast-path: if the identical ticket is already cached in memory, skip redundant write
+        {
+            std::shared_lock lock(g_ticketMutex);
+            auto it = g_tickets.find(appId);
+            if (it != g_tickets.end() &&
+                it->second.eTicket.size() == data.size() &&
+                std::memcmp(it->second.eTicket.data(), data.data(), data.size()) == 0) {
+                LOG_DEBUG("WriteEncryptedTicket: AppId {} ticket already up-to-date, skipping redundant write", appId);
+                return true;
+            }
         }
 
+        {
+            std::unique_lock lock(g_ticketMutex);
+            auto& entry = g_tickets[appId];
+            entry.eTicket.assign(data.begin(), data.end());
+        }
         LOG_INFO("Wrote ETicket for AppId {} ({} bytes)", appId, data.size());
         return true;
     }
 
-    bool WriteSteamID(AppId_t appId, uint64_t steamId) {
-        const auto status = OSTPlatform::SteamCredentialStore::WriteSteamId(appId, steamId);
-        if (status != OSTPlatform::SteamCredentialStore::Status::Ok) {
-            LOG_ERROR("Failed to write SteamID for AppId {} to credential store: {}",
-                      appId, OSTPlatform::SteamCredentialStore::ToString(status));
-            return false;
-        }
+    bool WriteEncryptedTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+        return WriteEncryptedTicket(appId, std::span<const uint8_t>(data));
+    }
 
-        LOG_INFO("Wrote SteamID for AppId {} ({})", appId, steamId);
+    bool RemoveEncryptedTicket(AppId_t appId) {
+        if (appId == 0) return false;
+
+        std::unique_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        if (it != g_tickets.end()) {
+            it->second.eTicket.clear();
+        }
         return true;
     }
 
-    uint64_t GetSpoofSteamID(AppId_t appId) {
-        // exclude those appids that are not in addappid
-        if (!LuaConfig::HasDepot(appId)) {
-            LOG_DEBUG("GetSpoofSteamID for AppId {}: not in addappid, skip spoofing", appId);
-            return 0;
-        }
-        const uint64_t credentialSteamID = GetSteamIDFromCredentialStore(appId);
-        if (credentialSteamID != 0) {
-            return credentialSteamID;
-        }
+    bool ClearCachedTickets(AppId_t appId) {
+        if (appId == 0) return false;
 
-        // The SteamID baked into the cached AppOwnershipTicket is the same
-        // one Steam itself uses for this app — pull it straight out of the
-        // ticket so spoofed responses match what the DRM layer expects.
+        std::unique_lock lock(g_ticketMutex);
+        return g_tickets.erase(appId) > 0;
+    }
+
+    uint64_t ExtractSteamIdFromTicketBytes(std::span<const uint8_t> ticket) noexcept {
         // Layout: ticket bytes start with [uint32 Size][uint32 Version][uint64 SteamID][...].
-        std::vector<uint8_t> ticket = GetAppOwnershipTicketFromCredentialStore(appId);
-        if (ticket.size() >= kSteamIdTicketMinimumSize) {
-            const uint64_t steamID = reinterpret_cast<const uint64_t*>(ticket.data())[1];
-            LOG_DEBUG("GetSpoofSteamID for AppId {}: -> 0x{:X}({})", appId, steamID, steamID);
-            return steamID;
+        if (ticket.size() < kSteamIdTicketMinimumSize) return 0;
+        uint64_t steamId = 0;
+        std::memcpy(&steamId, ticket.data() + kAppTicketSteamIdOffset, sizeof(uint64_t));
+        return steamId;
+    }
+
+    uint64_t ExtractSteamIdFromTicketBytes(const uint8_t* data, size_t size) noexcept {
+        if (!data || size == 0) return 0;
+        return ExtractSteamIdFromTicketBytes(std::span<const uint8_t>(data, size));
+    }
+
+    uint64_t ExtractSteamIdFromTicketBytes(const std::vector<uint8_t>& ticket) noexcept {
+        return ExtractSteamIdFromTicketBytes(std::span<const uint8_t>(ticket));
+    }
+
+    uint64_t GetTicketSteamID(AppId_t appId) {
+        if (appId == 0) return 0;
+        std::shared_lock lock(g_ticketMutex);
+        auto it = g_tickets.find(appId);
+        if (it != g_tickets.end() && !it->second.appTicket.empty()) {
+            return ExtractSteamIdFromTicketBytes(it->second.appTicket);
         }
         return 0;
     }

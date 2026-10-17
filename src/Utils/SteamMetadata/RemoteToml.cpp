@@ -1,8 +1,8 @@
 #include "RemoteToml.h"
-#include "Branding.h"
+#include "dllmain.h"
+#include "OSTPlatform/include/Encoding.h"
 #include "OSTPlatform/include/Http.h"
 #include "Utils/Config/Config.h"
-#include "Utils/Config/Paths.h"
 #include "Utils/Logging/Log.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 
@@ -11,33 +11,24 @@
 #include <fstream>
 #include <string_view>
 #include <vector>
+#include <windows.h>
+#include <toml++/toml.hpp>
 
 namespace RemoteToml {
 
 namespace {
-    // Smokestack: per-build files published by tools/sigport.
     constexpr const char* kGithubTemplate =
-        "https://raw.githubusercontent.com/SvnFrs/smokestack/"
+        "https://raw.githubusercontent.com/mmxlyo/steam-monitor/"
         "{channel}/{component}/{sha256}.toml";
     constexpr const char* kJsdelivrTemplate =
-        "https://cdn.jsdelivr.net/gh/SvnFrs/smokestack@"
+        "https://cdn.jsdelivr.net/gh/mmxlyo/steam-monitor@"
         "{channel}/{component}/{sha256}.toml";
 
-    std::filesystem::path CacheDir(const Request& request)
-    {
-        std::filesystem::path root = Paths::DataDir();
-        if (root.empty())
-            root = std::filesystem::path(request.dllPath).parent_path() / Branding::kDataDirName;
-        return root / request.channel / request.component;
-    }
-
-    std::string ReadFile(const std::filesystem::path& path)
-    {
-        std::ifstream ifs(path, std::ios::binary);
-        if (!ifs) return {};
-        return std::string((std::istreambuf_iterator<char>(ifs)),
-                           std::istreambuf_iterator<char>());
-    }
+    // Strictly bounded network timeouts for small metadata TOML files.
+    constexpr uint32_t kRemoteResolveTimeoutMs = 1500;
+    constexpr uint32_t kRemoteConnectTimeoutMs = 2000;
+    constexpr uint32_t kRemoteSendTimeoutMs    = 2000;
+    constexpr uint32_t kRemoteRecvTimeoutMs    = 3000;
 
     static bool HasPlaceholder(std::string_view text, std::string_view placeholder)
     {
@@ -86,11 +77,25 @@ namespace {
 
         return { remoteUrlTemplate };
     }
+
+    static bool ValidateTomlContent(std::string_view body, std::string* outError = nullptr)
+    {
+        try {
+            const auto tbl = toml::parse(body);
+            return !tbl.empty();
+        } catch (const toml::parse_error& e) {
+            if (outError) *outError = e.description();
+            return false;
+        }
+    }
+
 } // namespace
 
-Result Fetch(const Request& request)
+Result Fetch(const Request& request, FetchMode mode)
 {
     namespace fs = std::filesystem;
+    using OSTPlatform::Encoding::PathFromUtf8;
+    using OSTPlatform::Encoding::PathToUtf8;
     Result out;
 
     // 1. SHA-256 of the DLL.
@@ -100,7 +105,7 @@ Result Fetch(const Request& request)
         std::chrono::steady_clock::now() - hashStart).count();
 
     if (out.sha256.empty()) {
-        LOG_WARN("RemoteToml({}/{}): Sha256OfFile failed for {} ({} ms)",
+        LOG_WARN("RemoteToml({}/{}): Sha256Of failed for {} ({} ms)",
                  request.channel, request.component, request.dllPath, hashMs);
         return out;
     }
@@ -108,18 +113,59 @@ Result Fetch(const Request& request)
              request.channel, request.component, out.sha256, hashMs);
 
     // 2. Cache path & dir.
-    fs::path cacheDir  = CacheDir(request);
+    fs::path steamRoot = PathFromUtf8(request.dllPath).parent_path();
+    fs::path baseDir = PathFromUtf8(GetStorageDirectory());
+    if (baseDir.empty()) {
+        baseDir = steamRoot;
+    }
+    fs::path cacheDir  = baseDir / "opensteamtool" / request.channel / request.component;
     fs::path cachePath = cacheDir / (out.sha256 + ".toml");
-    const std::string cachePathText = cachePath.string();
 
-    std::error_code mkdirEc;
-    fs::create_directories(cacheDir, mkdirEc);
-    if (mkdirEc) {
-        LOG_WARN("RemoteToml({}/{}): could not create cache dir {} ({})",
-                 request.channel, request.component, cacheDir.string(), mkdirEc.message());
+    // Normal startup is cache-first. RemoteOnly deliberately skips this read
+    // so the existing mirror chain can replace a stale exact-SHA cache.
+    fs::path localPath = cachePath;
+    std::error_code ec;
+    bool found = mode == FetchMode::PreferCache && fs::exists(localPath, ec) && !ec;
+    if (!found && mode == FetchMode::PreferCache && IsPortableMode()) {
+        fs::path steamCachePath = steamRoot / "opensteamtool" / request.channel / request.component / (out.sha256 + ".toml");
+        if (fs::exists(steamCachePath, ec) && !ec) {
+            localPath = steamCachePath;
+            found = true;
+        }
     }
 
-    // 3. Try remote (mirror chain with early-out on 404).
+    if (found) {
+        ec.clear();
+        const auto sz = fs::file_size(localPath, ec);
+        if (!ec && sz > 0) {
+            std::ifstream ifs(localPath, std::ios::binary);
+            if (ifs) {
+                std::string buf(static_cast<size_t>(sz), '\0');
+                if (ifs.read(buf.data(), static_cast<std::streamsize>(sz))) {
+                    std::string parseErr;
+                    if (ValidateTomlContent(buf, &parseErr)) {
+                        LOG_INFO("RemoteToml({}/{}): loaded from cache {}",
+                                 request.channel, request.component, PathToUtf8(localPath));
+                        out.body = std::move(buf);
+                        out.ok = true;
+                        out.fromCache = true;
+                        return out;
+                    }
+                    // Self-healing: if local file exists but is corrupted (e.g. truncated/bad HTML),
+                    // purge it and fall back to remote mirror fetch instead of permanently bricking startup.
+                    LOG_WARN("RemoteToml({}/{}): cache file exists but corrupted ({}). Purging bad cache: {}",
+                             request.channel, request.component, parseErr, PathToUtf8(localPath));
+                    std::error_code rmEc;
+                    fs::remove(localPath, rmEc);
+                }
+            } else {
+                LOG_WARN("RemoteToml({}/{}): cache file exists but failed to read: {}",
+                         request.channel, request.component, PathToUtf8(localPath));
+            }
+        }
+    }
+
+    // 3. Cache miss or explicit refresh -> Try remote (mirror chain with early-out on 404).
     const std::vector<std::string> urlTemplates = BuildUrlTemplates();
     OSTPlatform::Http::Result http;
     std::string lastUrl;
@@ -129,10 +175,23 @@ Result Fetch(const Request& request)
         LOG_INFO("RemoteToml({}/{}): downloading {}",
                  request.channel, request.component, lastUrl);
 
-        http = OSTPlatform::Http::Execute(L"GET", lastUrl.c_str(),
-                                          nullptr, 0, nullptr);
+        http = OSTPlatform::Http::Execute(
+            L"GET", lastUrl.c_str(),
+            nullptr, 0, nullptr,
+            kRemoteResolveTimeoutMs,
+            kRemoteConnectTimeoutMs,
+            kRemoteSendTimeoutMs,
+            kRemoteRecvTimeoutMs);
 
-        if (http.ok && http.status == 200) break;
+        if (http.ok && http.status == 200) {
+            std::string parseErr;
+            if (ValidateTomlContent(http.body, &parseErr)) {
+                break; // Valid TOML content received
+            }
+            LOG_WARN("RemoteToml({}/{}): mirror returned HTTP 200 but payload is not valid TOML ({}) from {}",
+                     request.channel, request.component, parseErr, lastUrl);
+            http.ok = false;
+        }
 
         if (http.ok && http.status == 404) {
             LOG_WARN("RemoteToml({}/{}): mirror has no such file (HTTP 404): {}",
@@ -146,78 +205,61 @@ Result Fetch(const Request& request)
         }
     }
 
-    // 4. Remote OK → write cache, return body.
+    // 4. Remote OK and validated -> write cache atomically, return body.
     if (http.ok && http.status == 200 && !http.body.empty()) {
-        std::ofstream ofs(cachePath, std::ios::binary);
-        if (ofs) {
-            ofs.write(http.body.data(),
-                      static_cast<std::streamsize>(http.body.size()));
-            LOG_INFO("RemoteToml({}/{}): cached to {}",
-                     request.channel, request.component, cachePathText);
+        std::error_code mkdirEc;
+        fs::create_directories(cacheDir, mkdirEc);
+        if (mkdirEc) {
+            LOG_WARN("RemoteToml({}/{}): could not create cache dir {} ({})",
+                     request.channel, request.component, PathToUtf8(cacheDir), mkdirEc.message());
+        }
+
+        fs::path tempPath = cacheDir / (out.sha256 + ".tmp." +
+                                        std::to_string(::GetCurrentProcessId()) + "." +
+                                        std::to_string(::GetCurrentThreadId()));
+        bool writeOk = false;
+        {
+            std::ofstream ofs(tempPath, std::ios::binary);
+            if (ofs) {
+                ofs.write(http.body.data(),
+                          static_cast<std::streamsize>(http.body.size()));
+                ofs.flush();
+                writeOk = ofs.good();
+            }
+        }
+
+        if (writeOk) {
+            if (MoveFileExW(tempPath.c_str(), cachePath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                LOG_INFO("RemoteToml({}/{}): cached to {}",
+                         request.channel, request.component, PathToUtf8(cachePath));
+            } else {
+                std::error_code renameEc;
+                fs::rename(tempPath, cachePath, renameEc);
+                if (!renameEc) {
+                    LOG_INFO("RemoteToml({}/{}): cached to {}",
+                             request.channel, request.component, PathToUtf8(cachePath));
+                } else {
+                    LOG_WARN("RemoteToml({}/{}): atomic cache rename failed: {}",
+                             request.channel, request.component, renameEc.message());
+                    std::error_code rmEc;
+                    fs::remove(tempPath, rmEc);
+                }
+            }
         } else {
-            LOG_WARN("RemoteToml({}/{}): could not open {} for writing",
-                     request.channel, request.component, cachePathText);
+            std::error_code rmEc;
+            fs::remove(tempPath, rmEc);
+            LOG_WARN("RemoteToml({}/{}): could not write cache {}",
+                     request.channel, request.component, PathToUtf8(tempPath));
         }
         out.body = std::move(http.body);
         out.ok = true;
         return out;
     }
 
-    // 5. Remote failed → fall back to whatever is cached for this exact SHA.
-    if (fs::exists(cachePath)) {
-        LOG_WARN("RemoteToml({}/{}): remote failed (last URL {} HTTP {}); "
-                 "falling back to local cache {}",
-                 request.channel, request.component,
-                 lastUrl.empty() ? "<none>" : lastUrl, http.status, cachePathText);
-
-        std::string buf = ReadFile(cachePath);
-        if (!buf.empty()) {
-            out.body = std::move(buf);
-            out.ok = true;
-            out.fromCache = true;
-            return out;
-        }
-        LOG_WARN("RemoteToml({}/{}): cache file empty or unreadable: {}",
-                 request.channel, request.component, cachePathText);
-    }
-
-    // 6. Total failure — caller handles popup / degraded mode.
+    // 5. Total failure — caller handles popup / degraded mode.
     LOG_WARN("RemoteToml({}/{}): no source available (last URL: {} HTTP {})",
              request.channel, request.component,
              lastUrl.empty() ? "<none>" : lastUrl, http.status);
-    return out;
-}
-
-Result FetchNewestCached(const Request& request, const std::string& excludeSha256)
-{
-    namespace fs = std::filesystem;
-    Result out;
-
-    // Newest by write time: the cache is rewritten on every successful fetch,
-    // so this is the build that was running most recently.
-    fs::path newest;
-    fs::file_time_type newestTime{};
-    std::error_code ec;
-    for (fs::directory_iterator it(CacheDir(request), ec), end; !ec && it != end; it.increment(ec)) {
-        const fs::path& p = it->path();
-        if (p.extension() != ".toml" || p.stem().string() == excludeSha256) continue;
-        std::error_code timeEc;
-        const auto t = it->last_write_time(timeEc);
-        if (timeEc) continue;
-        if (newest.empty() || t > newestTime) {
-            newest = p;
-            newestTime = t;
-        }
-    }
-    if (newest.empty()) return out;
-
-    out.body = ReadFile(newest);
-    if (out.body.empty()) return out;
-    out.sha256 = newest.stem().string();
-    out.ok = true;
-    out.fromCache = true;
-    LOG_WARN("RemoteToml({}/{}): using data from another build ({}) as a fallback",
-             request.channel, request.component, out.sha256);
     return out;
 }
 

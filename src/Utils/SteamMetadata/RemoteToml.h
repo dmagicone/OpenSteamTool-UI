@@ -3,6 +3,11 @@
 
 namespace RemoteToml {
 
+    enum class FetchMode {
+        PreferCache,
+        RemoteOnly,
+    };
+
     struct Request {
         std::string channel;    // "pattern" or "ipc"
         std::string component;  // "steamclient" or "steamui"
@@ -13,16 +18,11 @@ namespace RemoteToml {
         bool        ok        = false;
         bool        fromCache = false;
         std::string body;
-        std::string sha256;     // of the file the body belongs to
+        std::string sha256;
     };
 
-    // Fetch remote TOML first, then fall back to the exact local cache entry.
-    Result Fetch(const Request& request);
-
-    // Newest cached file for this channel/component whose sha256 is not
-    // `excludeSha256`: data for a *different* build, for when none exists for
-    // the running one. Callers may only use build-independent parts of it
-    // (signatures, IPC hashes) — its RVAs belong to the other build.
-    Result FetchNewestCached(const Request& request, const std::string& excludeSha256);
+    // Prefer the exact local cache during normal startup. RemoteOnly bypasses
+    // that cache and is reserved for an explicit lazy refresh.
+    [[nodiscard]] Result Fetch(const Request& request, FetchMode mode = FetchMode::PreferCache);
 
 } // namespace RemoteToml

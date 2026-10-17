@@ -6,13 +6,15 @@
 
 namespace PatternLoader {
 
-    // Load metadata before installing hooks for a module. Without a file for
-    // the running build, falls back to the newest cached file of another build
-    // (signatures only, unique matches only).
+    // Load metadata before installing hooks for a module.
     bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& dllPath, const std::string& component);
 
-    // Resolve by RVA first, then fall back to signature scanning.
-    void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* funcName);
+    // Resolve function address by RVA from metadata.
+    [[nodiscard]] void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* funcName);
+
+    // If a cached TOML lacked a requested function entry, refresh that module's
+    // exact-SHA cache after initialization. Parsed metadata is not hot-reloaded.
+    void RefreshMissingMetadata();
 
     // Report unresolved functions after all hooks have been installed.
     void ReportMissingFunctions();

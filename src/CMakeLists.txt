@@ -4,7 +4,44 @@ project(OpenSteamTool VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
-set(OpenSteamTool_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
+string(TIMESTAMP OST_BUILD_TIMESTAMP "%Y%m%d_%H%M")
+
+# Automatic version resolution (Release Tag -> CI PR -> Git short hash -> Build Timestamp)
+if(NOT DEFINED OPENSTEAMTOOL_VERSION OR OPENSTEAMTOOL_VERSION STREQUAL "" OR OPENSTEAMTOOL_VERSION STREQUAL "${PROJECT_VERSION}")
+    find_package(Git QUIET)
+    set(OST_RESOLVED_VERSION "")
+    if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.git")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE OST_GIT_TAG
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(OST_GIT_TAG)
+            set(OST_RESOLVED_VERSION "${OST_GIT_TAG}")
+        else()
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE OST_GIT_COMMIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(OST_GIT_COMMIT)
+                set(OST_RESOLVED_VERSION "${OST_GIT_COMMIT}")
+            endif()
+        endif()
+    endif()
+
+    if(NOT OST_RESOLVED_VERSION)
+        set(OST_RESOLVED_VERSION "${OST_BUILD_TIMESTAMP}")
+    endif()
+
+    set(OPENSTEAMTOOL_VERSION "${OST_RESOLVED_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll" FORCE)
+else()
+    set(OPENSTEAMTOOL_VERSION "${OPENSTEAMTOOL_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll" FORCE)
+endif()
 
 # Allow CMAKE_MSVC_RUNTIME_LIBRARY to control runtime selection for all targets,
 # including dependencies pulled in via FetchContent.
@@ -19,11 +56,51 @@ set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
+# Direct all static libraries and import libraries (.lib, .exp) to a dedicated
+# lib/ subdirectory so Release and Debug distribution folders contain only runtime artifacts.
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/lib/Release")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/lib/Debug")
+
 
 if(NOT WIN32)
     message(STATUS "OpenSteamTool: no targets on non-Windows platforms; skipping.")
     return()
 endif()
+
+add_compile_definitions(NOMINMAX)
+if(MSVC)
+    # OpenSteamTool Release prioritizes minimal binary size (/O1) over raw speed (/O2).
+    # Clean CMake's baseline Release flags to prevent MSVC D9025 command line override warnings.
+    foreach(flag_var CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE)
+        if(${flag_var} MATCHES "/O2")
+            string(REPLACE "/O2" "/O1" _cleaned_flags "${${flag_var}}")
+            set(${flag_var} "${_cleaned_flags}" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        elseif(NOT ${flag_var} MATCHES "/O1")
+            set(${flag_var} "${${flag_var}} /O1" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        endif()
+    endforeach()
+
+    add_compile_options(
+        /utf-8
+        /EHsc
+        $<$<CONFIG:Release>:/GL>
+        $<$<CONFIG:Release>:/Gy>
+        $<$<CONFIG:Release>:/Gw>
+        $<$<CONFIG:Release>:/GF>
+    )
+    add_link_options(
+        "/DYNAMICBASE"
+        "/NXCOMPAT"
+        "/HIGHENTROPYVA"
+        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+        $<$<CONFIG:Release>:/INCREMENTAL:NO>
+    )
+endif()
+
+
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 configure_file(
@@ -33,10 +110,26 @@ configure_file(
 )
 
 # ---------------------------------------------------------------------------
+# Proxy DLL targets — dwmapi.dll and version.dll
+# Defined early so tools (ost-manager) can embed their binaries.
+# ---------------------------------------------------------------------------
+add_library(dwmapi SHARED
+    dwmapi/dwmapi.cpp
+    dwmapi/dwmapi.def
+    dwmapi/dwmapi.rc
+)
+
+add_library(version SHARED
+    version/version.cpp
+    version/version.def
+    version/version.rc
+)
+
+# ---------------------------------------------------------------------------
 # Dependency recipes (FetchContent-backed, cached at <repo>/.deps).
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(OpenSteamTool_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
+set(OPENSTEAMTOOL_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
 include(Lua)
 include(Spdlog)
 include(Protobuf)
@@ -46,14 +139,14 @@ include(LogMacros)
 # Build the host code generators (ipc_codegen) in their own binary subtree so
 # their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
 # means only the tools actually depended on (ipc_codegen) get built here.
-add_subdirectory("${OpenSteamTool_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
-include("${OpenSteamTool_TOOLS_DIR}/cmake/IPCCodegen.cmake")
+add_subdirectory("${OPENSTEAMTOOL_TOOLS_DIR}" "${CMAKE_BINARY_DIR}/tools" EXCLUDE_FROM_ALL)
+include("${OPENSTEAMTOOL_TOOLS_DIR}/cmake/IPCCodegen.cmake")
 
 set(IPC_IDL "${CMAKE_CURRENT_SOURCE_DIR}/Steam/IPCMessages.steamd")
 # Per-config output dir, mirroring the protobuf recipe below: a Multi-Config
 # build invokes the generator once per config, and a single shared output file
 # would ping-pong between the Release/Debug graphs and force needless rebuilds.
-OpenSteamTool_add_ipc_codegen(IPC_GEN
+opensteamtool_add_ipc_codegen(IPC_GEN
     IDL "${IPC_IDL}"
     CPP_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
 )
@@ -71,15 +164,17 @@ OpenSteamTool_add_ipc_codegen(IPC_GEN
 # ---------------------------------------------------------------------------
 set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/proto/steam_messages.proto")
 set(PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>")
+file(RELATIVE_PATH PROTO_REL_GEN_BASE "${CMAKE_CURRENT_SOURCE_DIR}/proto" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 add_custom_command(
     OUTPUT "${PROTO_GEN_DIR}/steam_messages.pb.cc"
            "${PROTO_GEN_DIR}/steam_messages.pb.h"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${PROTO_GEN_DIR}"
     COMMAND $<TARGET_FILE:protoc>
-        "--cpp_out=$<$<CONFIG:Release>:lite:>${PROTO_GEN_DIR}"
-        "-I${CMAKE_CURRENT_SOURCE_DIR}/proto"
-        "${PROTO_SRC}"
+        "--cpp_out=$<$<CONFIG:Release>:lite:>${PROTO_REL_GEN_BASE}/$<CONFIG>"
+        "-I."
+        "steam_messages.proto"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/proto"
     DEPENDS "${PROTO_SRC}" protoc
     COMMENT "Generating protobuf C++ sources"
     VERBATIM
@@ -100,14 +195,15 @@ add_subdirectory(OSTPlatform)
 # OpenSteamTool — the hook DLL injected into Steam (always 64-bit).
 add_library(OpenSteamTool SHARED
     dllmain.cpp
+    OpenSteamTool.rc
 
     # Shared utilities
     Utils/Tickets/AppTicket.cpp
+    Utils/Tickets/EticketClient.cpp
     Utils/Config/Config.cpp
     Utils/Config/ConfigFileWatcher.cpp
     Utils/Config/LuaConfig.cpp
     Utils/Config/LuaFileWatcher.cpp
-    Utils/Config/Paths.cpp
     Utils/CloudRedirect/CloudRedirectHost.cpp
     Utils/HookSupport/VehCommon.cpp
     Utils/Logging/Log.cpp
@@ -124,6 +220,7 @@ add_library(OpenSteamTool SHARED
     Pipe/ProcessInspector.cpp
     Pipe/Features/DenuvoAuth/DenuvoAuth.cpp
     Pipe/Features/DenuvoAuth/ProtectionScan.cpp
+    Pipe/Features/DenuvoAuth/DenuvoSync.cpp
     Pipe/Features/Injection/Injection.cpp
 
     # Generated IPC message structs (depends on IPCMessages.steamd via add_custom_command)
@@ -131,12 +228,11 @@ add_library(OpenSteamTool SHARED
 
     # Per-category hook modules
     Hook/HookManager.cpp
-    Hook/Hooks_CallBack.cpp
     Hook/Hooks_Decryption.cpp
+    Hook/Hooks_Diversion.cpp
     Hook/Hooks_IPC.cpp
     Hook/Hooks_IPC_ISteamUser.cpp
     Hook/Hooks_IPC_ISteamUtils.cpp
-    Hook/Hooks_KeyValues.cpp
     Hook/Hooks_Manifest.cpp
     Hook/Hooks_Misc.cpp
     Hook/Hooks_NetPacket.cpp
@@ -166,20 +262,38 @@ target_link_libraries(OpenSteamTool PRIVATE
 
 # Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
 target_compile_definitions(OpenSteamTool PRIVATE
-    $<$<CONFIG:Debug>:OpenSteamTool_LOGGING_ENABLED>
+    $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
 )
 
-# ---------------------------------------------------------------------------
-# dwmapi.dll hijack — small loader DLL placed alongside Steam.
-# ---------------------------------------------------------------------------
-add_library(dwmapi SHARED
-    dwmapi/dwmapi.cpp
-)
+# Backend endpoint for on-demand eticket minting (strict Denuvo titles that bind
+# their encrypted app ticket to a launch nonce). Empty by default: the feature is
+# off and the DLL never makes a network request. Point your own build at your own
+# backend and the resulting DLL is self-contained, no Lua config needed:
+#
+#   cmake -B build -DOST_ETICKET_URL="https://your-host/eticket"
+#
+# Left out of the source deliberately so no single deployment's backend ships
+# baked into a public tree. seteticketurl() in the Lua config overrides it.
+set(OST_ETICKET_URL "" CACHE STRING
+    "Backend URL for on-demand eticket minting (empty disables the feature)")
+if(OST_ETICKET_URL)
+    target_compile_definitions(OpenSteamTool PRIVATE
+        OST_ETICKET_URL="${OST_ETICKET_URL}")
+endif()
 
-# ---------------------------------------------------------------------------
-# xinput1_4.dll hijack — secondary loader DLL placed alongside Steam.
-# ---------------------------------------------------------------------------
-add_library(xinput1_4 SHARED
-    xinput1_4/xinput1_4.cpp
-    xinput1_4/xinput1_4.def
-)
+
+if(TARGET extract_tickets)
+    add_dependencies(OpenSteamTool extract_tickets)
+endif()
+if(TARGET ost-manager)
+    add_dependencies(ost-manager OpenSteamTool)
+    add_custom_target(ost-manager-all ALL DEPENDS ost-manager)
+endif()
+if(TARGET version)
+    add_dependencies(OpenSteamTool version)
+endif()
+if(TARGET dwmapi)
+    add_dependencies(OpenSteamTool dwmapi)
+endif()
+
+
