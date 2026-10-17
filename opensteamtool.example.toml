@@ -6,10 +6,14 @@
 # Log verbosity for all log files (Debug build only).
 # Valid: trace, debug, info, warn, error
 level = "debug"
+# Directory where log files are written (optional, Debug build only).
+# Defaults to "<Steam>/opensteamtool" or alongside opensteamtool.toml.
+# dir = "opensteamtool"
 
 [manifest]
 # Which upstream API to query for depot manifest request codes.
-#   "opensteamtool" → https://manifest.opensteamtool.com/{gid}   (default)
+#   "manifestdex"   → https://manifest.manifestdex.com/{gid}     (default)
+#   "opensteamtool" → https://manifest.opensteamtool.com/{gid}
 #   "wudrm"         → http://gmrc.wudrm.com/manifest/{gid} (recommended for China users)
 #   "steamrun"      → https://manifest.steam.run/api/manifest/{gid}
 # If <Steam>/config/lua/manifest.lua defines fetch_manifest_code(gid) or
@@ -44,7 +48,7 @@ level = "debug"
 #     end
 #     return nil
 # end
-url = "opensteamtool"
+url = "manifestdex"
 
 # HTTP timeouts for manifest requests (milliseconds).
 # timeout_resolve_ms  — DNS resolution        (default: 5000)
@@ -55,6 +59,19 @@ timeout_resolve_ms = 5000
 timeout_connect_ms = 5000
 timeout_send_ms    = 10000
 timeout_recv_ms    = 10000
+
+# Whether to enforce depot manifest locking (setManifestid) on games/DLCs truly owned by the current account.
+# false (default) -> Bypasses manifest locking for owned games/DLCs, allowing Steam to receive official updates normally.
+#                    Unowned DLCs and secondary accounts without licenses remain strictly manifest-locked.
+# true            -> Enforces manifest locking on all depots in Lua, even if the account owns the license.
+lock_owned_games = false
+
+# Whether to automatically synchronize .lua and manifest mirrors when an owned game finishes updating in Steam (without having to launch the game).
+# PREREQUISITE: The current logged-in account must hold genuine authorization/ownership, AND a .lua file configuring addappid must already exist locally for this game.
+#               If not logged into an authorized account or no .lua file configuring addappid exists locally, OST will NEVER take over, generate or touch files.
+# true (default)  -> Automatically synchronize in the background as soon as Steam completes the update download.
+# false           -> Synchronize only when the game is launched ("Play" button).
+auto_sync_on_update = true
 
 [stats]
 # Automatically query https://stats.opensteamtool.com/{appid} for a recommended
@@ -71,26 +88,68 @@ enable_api = true
 [lua]
 # paths = []
 
-[inject]
-# Optional library injection into game processes.
-# The injected library must match the target process architecture.
-enabled = false
-# library_x64 = "OpenSteamTool.GameHook.x64.dll"
-# library_x86 = "OpenSteamTool.GameHook.x86.dll"
+[injects]
+# Global DLL injection settings.
+# exclude_appids: AppIDs to strictly exclude from library injection into game processes.
+# Explicitly specifying appids here overrides the built-in default list without merging.
+# If omitted entirely, OpenSteamTool defaults to protecting ~20 known competitive multiplayer games (VAC/EAC/BattlEye).
+# Whitelist precedence: if an AppID listed in exclude_appids is explicitly specified in an [[inject]]
+# rule's when_appids, the whitelist takes priority and that AppID will NOT be excluded for that rule.
+# Note: This exclusion ONLY applies to DLL injection into game processes; game unlocking and DLC simulation are never affected.
+exclude_appids = [
+    # --- Valve Anti-Cheat (VAC) core competitive series ---
+    730,      # Counter-Strike 2 (CS2 / CS:GO)
+    570,      # Dota 2
+    440,      # Team Fortress 2
+    550,      # Left 4 Dead 2
+    1422450,  # Deadlock
+    240,      # Counter-Strike: Source
+    300,      # Day of Defeat: Source
+
+    # --- Easy Anti-Cheat (EAC) popular multiplayer series ---
+    1172470,  # Apex Legends
+    252490,   # Rust
+    381210,   # Dead by Daylight
+    2073850,  # THE FINALS
+    230410,   # Warframe
+    236390,   # War Thunder
+    976730,   # Halo: The Master Chief Collection
+    1240440,  # Halo Infinite
+
+    # --- BattlEye / Tencent ACE / other kernel-level anti-cheat series ---
+    578080,   # PUBG: BATTLEGROUNDS
+    359550,   # Tom Clancy's Rainbow Six Siege
+    1085660,  # Destiny 2
+    1938090,  # Call of Duty® (Ricochet)
+    2195250,  # EA SPORTS FC™ 24
+    2669320,  # EA SPORTS FC™ 25
+    553850,   # HELLDIVERS™ 2 (nProtect GameGuard)
+]
+
+# Optional library injection into game processes. Each [[inject]] entry is evaluated
+# when launching a game process.
+#
+# Injection rule example (commented out by default; enable as needed):
+# [[inject]]
+# path = "OnlineFix.dll"              # bare name resolves next to steam.exe; absolute path used as-is
+# all_games = false                   # [IMPORTANT] Must default to false. false = targets Lua-unlocked games (injects into all Lua games if when_appids is omitted; specify when_appids or when_cmdline to restrict). true = injects all Steam games (protected by exclude_appids).
+# when_cmdline = "-onlinefix"         # Optional: require this substring in launch command (default: any)
+# when_appids = [1361510]             # Whitelist: target specific AppIDs (takes priority over exclude_appids)
 
 [cloud]
 # Optional Steam Cloud save redirection for unlocked ("lua") games, powered by
 # CloudRedirect (https://github.com/Selectively11/CloudRedirect).
 # When enabled, OpenSteamTool loads cloud_redirect.dll inside Steam, registers
 # every addappid() game as a redirected app, and routes their Steam Cloud RPCs
-# through CloudRedirect's cloud-save engine.
+# through CloudRedirect's cloud-save engine (fully compatible with Diversion memory isolation).
 #
 # Provider sign-in (Google Drive / OneDrive / local folder) is still done through
 # CloudRedirect's own companion app — OpenSteamTool only hosts the DLL.
 enabled = false
-# Path to cloud_redirect.dll. Absolute, or relative to the Steam root directory.
-# Defaults to "<Steam>/cloud_redirect.dll" when unset.
+# Path to cloud_redirect.dll. Absolute, or relative to opensteamtool.toml, DLL dir, or Steam root.
+# Defaults to searching alongside opensteamtool.toml, OpenSteamTool.dll, then Steam root.
 # library = "cloud_redirect.dll"
+
 
 [remote]
 # Optional metadata mirror. Leave unset to use GitHub with jsDelivr fallback.
@@ -98,4 +157,4 @@ enabled = false
 # three placeholders: {channel}, {component}, and {sha256}.
 #
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/mmxlyo/steam-monitor@{channel}/{component}/{sha256}.toml"
