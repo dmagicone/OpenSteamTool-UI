@@ -2,6 +2,7 @@
 #include "HookMacros.h"
 #include "Hook/Hooks_Package.h"
 #include "Utils/Config/Config.h"
+#include "Utils/Config/IgnoreList.h"
 #include "Utils/Config/LuaConfig.h"
 #include "dllmain.h"
 #include <format>
@@ -61,7 +62,11 @@ namespace {
                 auto it = overrides.find(e.DepotId);
                 if (it != overrides.end()) {
                     AppId_t targetAppId = (e.DlcAppId != 0) ? e.DlcAppId : (e.AppId != 0 ? e.AppId : AppId);
-                    if (!lockOwned && Hooks_Package::HasValidLicense(targetAppId)) {
+                    const bool ignored = IgnoreList::IsIgnored(targetAppId);
+                    // Ignored apps always get their manifest pinned, even if
+                    // the user has a valid (owned/shared) license for the game.
+                    // Non-ignored apps respect the manifest_lock_owned_games setting.
+                    if (!ignored && !lockOwned && Hooks_Package::HasValidLicense(targetAppId)) {
                         LOG_MANIFEST_INFO("BuildDepotDependency: skipping manifest lock for licensed targetAppId={} depot={}",
                             targetAppId, e.DepotId);
                         continue;
@@ -69,9 +74,9 @@ namespace {
 
                     // if size=0 in the override, keep the original size(affects download display but not the actual download)
                     uint64_t newSize = it->second.size ? it->second.size : e.ManifestSize;
-                    LOG_MANIFEST_INFO("BuildDepotDependency: patching {} depot {} gid={}->{} size={}->{}",
+                    LOG_MANIFEST_INFO("BuildDepotDependency: patching {} depot {} gid={}->{} size={}->{} (ignored={})",
                         label, e.DepotId, e.ManifestGid, it->second.gid,
-                        e.ManifestSize, newSize);
+                        e.ManifestSize, newSize, ignored);
                     e.ManifestGid  = it->second.gid;
                     e.ManifestSize = newSize;
                 }

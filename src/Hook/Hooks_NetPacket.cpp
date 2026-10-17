@@ -11,6 +11,7 @@
 #include "Pipe/Features/DenuvoAuth/DenuvoSync.h"
 #include "Utils/Support/FnvHash.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
+#include "Utils/Config/IgnoreList.h"
 #include "Utils/Config/LuaConfig.h"
 
 #include <algorithm>
@@ -1115,7 +1116,7 @@ namespace Hooks_NetPacket_Manifest {
         if (!req.has_depot_id() || !req.has_manifest_id()) return false;
 
         const uint32 depotId     = req.depot_id();
-        const uint64 manifestGid = req.manifest_id();
+        uint64 manifestGid       = req.manifest_id();
         if (depotId == 0 || manifestGid == 0) return false;
         if (!LuaConfig::HasDepot(depotId) || Hooks_Package::HasValidLicense(depotId)) return false;
 
@@ -1129,8 +1130,25 @@ namespace Hooks_NetPacket_Manifest {
 
         const uint32 appId = req.has_app_id() ? req.app_id() : 0;
 
-        LOG_MANIFEST_DEBUG("GetManifestRequestCode send: depot={} gid={} jobid={} app_id={}",
-                           depotId, manifestGid, jobId, appId);
+        // If this depot's app is in ignore.txt and has a pinned manifest
+        // override (setManifestid), substitute the pinned gid now so that:
+        //   1. The HTTP fetch retrieves the request code for the *pinned* version,
+        //      not the new gid Steam asked the content server for.
+        //   2. The pending-job and cache entries are keyed on the pinned gid so
+        //      the recv handler injects the correct code into the response.
+        const bool isIgnored = IgnoreList::IsIgnored(appId != 0 ? appId : depotId);
+        if (isIgnored) {
+            const auto overrides = LuaConfig::GetManifestOverrides();
+            auto it = overrides.find(static_cast<uint64_t>(depotId));
+            if (it != overrides.end() && it->second.gid != 0 && it->second.gid != manifestGid) {
+                LOG_MANIFEST_INFO("GetManifestRequestCode send: ignored depot={} substituting pinned gid={} for requested gid={}",
+                                  depotId, it->second.gid, manifestGid);
+                manifestGid = it->second.gid;
+            }
+        }
+
+        LOG_MANIFEST_DEBUG("GetManifestRequestCode send: depot={} gid={} jobid={} app_id={} ignored={}",
+                           depotId, manifestGid, jobId, appId, isIgnored);
 
         std::shared_ptr<std::promise<FetchResult>> prom;
         uint64 flightSeq = 0;
