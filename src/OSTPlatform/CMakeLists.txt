@@ -29,7 +29,6 @@ add_library(OSTPlatform STATIC
     Windows/PE.cpp
     Windows/Process.cpp
     Windows/RemoteProcess.cpp
-    Windows/SteamCredentialStore.cpp
     Windows/Thread.cpp
     Windows/Trap.cpp
 )
@@ -47,7 +46,10 @@ target_link_libraries(OSTPlatform PRIVATE
     detours
 )
 
-# Logging is compiled in only for Debug; Release reduces OSTP_LOG_* to no-ops.
-target_compile_definitions(OSTPlatform PRIVATE
-    $<$<CONFIG:Debug>:OpenSteamTool_LOGGING_ENABLED>
+target_compile_definitions(OSTPlatform
+    PUBLIC
+        NOMINMAX
+    PRIVATE
+        WIN32_LEAN_AND_MEAN
+        $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
 )

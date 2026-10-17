@@ -1,6 +1,6 @@
 #include "Config.h"
-#include "Paths.h"
-#include "Branding.h"
+#include "dllmain.h"
+#include "OSTPlatform/include/Encoding.h"
 #include "Utils/Logging/Log.h"
 #include "Utils/SteamMetadata/ManifestClient.h"
 
@@ -8,24 +8,42 @@
 
 #include <filesystem>
 #include <mutex>
+#include <shared_mutex>
 
 namespace Config {
 namespace {
 
     struct Snapshot {
-        std::string manifestProvider = "opensteamtool";
+        std::string manifestProvider = "manifestdex";
         ManifestTimeouts manifestTimeouts;
         LogLevel logLevel = LogLevel::Debug;
         std::string logDir;
         std::vector<std::string> luaPaths;
         std::string remoteUrlTemplate;
         bool statsEnableApi = true;
-        InjectionSettings injection;
+        std::vector<InjectDll> injectDlls;
         CloudSettings cloud;
+        bool manifestLockOwnedGames = false;
+        bool manifestAutoSyncOnUpdate = true;
     };
 
-    std::mutex g_mutex;
+    std::shared_mutex g_mutex;
     bool g_loadedOnce = false;
+
+    uint32_t manifestTimeoutResolve = 5000;
+    uint32_t manifestTimeoutConnect = 5000;
+    uint32_t manifestTimeoutSend    = 10000;
+    uint32_t manifestTimeoutRecv    = 10000;
+    LogLevel logLevel = LogLevel::Debug;
+    std::string logDir;
+    std::vector<std::string> luaPaths;
+    std::string remoteUrlTemplate;
+    bool statsEnableApi = true;
+    std::vector<InjectDll> injectDlls;
+    bool cloudEnabled = false;
+    std::string cloudLibrary;
+    bool manifestLockOwnedGames = false;
+    bool manifestAutoSyncOnUpdate = true;
 
     const char* ToString(LogLevel level) {
         switch (level) {
@@ -38,12 +56,28 @@ namespace {
         return "???";
     }
 
+    const std::unordered_set<AppId_t>& GetDefaultAntiCheatAppids() {
+        static const std::unordered_set<AppId_t> kDefaults = {
+            // Valve VAC
+            730, 570, 440, 550, 1422450, 240, 300,
+            // EAC
+            1172470, 252490, 381210, 2073850, 230410, 236390, 976730, 1240440,
+            // BattlEye / ACE / Ricochet / nProtect
+            578080, 359550, 1085660, 1938090, 2195250, 2669320, 553850
+        };
+        return kDefaults;
+    }
+
     Snapshot MakeDefaultSnapshot(const std::string& configPath) {
         Snapshot snapshot;
-        const std::filesystem::path& dataDir = Paths::DataDir();
-        snapshot.logDir = dataDir.empty()
-            ? (std::filesystem::path(configPath).parent_path() / Branding::kDataDirName).string()
-            : dataDir.string();
+        const char* storageDir = GetStorageDirectory();
+        if (storageDir && storageDir[0] != '\0') {
+            snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(
+                OSTPlatform::Encoding::PathFromUtf8(storageDir) / "opensteamtool");
+        } else {
+            std::filesystem::path p = OSTPlatform::Encoding::PathFromUtf8(configPath);
+            snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(p.parent_path() / "opensteamtool");
+        }
         return snapshot;
     }
 
@@ -57,22 +91,22 @@ namespace {
         luaPaths               = snapshot.luaPaths;
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
         statsEnableApi         = snapshot.statsEnableApi;
-        injectEnabled          = snapshot.injection.enabled;
-        injectLibraryX86       = snapshot.injection.libraryX86;
-        injectLibraryX64       = snapshot.injection.libraryX64;
+        injectDlls             = snapshot.injectDlls;
         cloudEnabled           = snapshot.cloud.enabled;
         cloudLibrary           = snapshot.cloud.library;
+        manifestLockOwnedGames = snapshot.manifestLockOwnedGames;
+        manifestAutoSyncOnUpdate = snapshot.manifestAutoSyncOnUpdate;
     }
 
     void ApplyManifestProvider(const std::string& provider) {
         if (!ManifestClient::SetProvider(provider)) {
             LOG_WARN("Unknown manifest.url \"{}\", keeping default", provider);
-            ManifestClient::SetProvider("opensteamtool");
+            ManifestClient::SetProvider("manifestdex");
         }
     }
 
     LoadResult ApplySnapshotLocked(const Snapshot& snapshot) {
-        std::lock_guard lock(g_mutex);
+        std::unique_lock lock(g_mutex);
         LoadResult result;
         result.luaPathsChanged = luaPaths != snapshot.luaPaths;
         ApplySnapshot(snapshot);
@@ -85,7 +119,8 @@ namespace {
 
     LoadResult Load(const std::string& configPath) {
         Snapshot snapshot = MakeDefaultSnapshot(configPath);
-        if (!std::filesystem::exists(configPath)) {
+        std::error_code ec;
+        if (!std::filesystem::exists(OSTPlatform::Encoding::PathFromUtf8(configPath), ec)) {
             LOG_INFO("Config file not found, using defaults");
             ApplyManifestProvider(snapshot.manifestProvider);
             LoadResult result = ApplySnapshotLocked(snapshot);
@@ -99,31 +134,62 @@ namespace {
         }
 
         try {
-            auto tbl = toml::parse_file(configPath);
+            auto tbl = toml::parse_file(OSTPlatform::Encoding::PathFromUtf8(configPath).wstring());
 
             // [manifest]
             if (auto manifest = tbl["manifest"].as_table()) {
                 if (auto val = (*manifest)["url"].value<std::string>()) {
                     snapshot.manifestProvider = *val;
                 }
-                if (auto val = (*manifest)["timeout_resolve_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.resolve = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_connect_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.connect = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_send_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.send = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_recv_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.recv = static_cast<uint32_t>(*val);
+                if (auto val = (*manifest)["timeout_resolve_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.resolve = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_connect_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.connect = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_send_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.send = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_recv_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.recv = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["lock_owned_games"].value<bool>())
+                    snapshot.manifestLockOwnedGames = *val;
+                if (auto val = (*manifest)["auto_sync_on_update"].value<bool>())
+                    snapshot.manifestAutoSyncOnUpdate = *val;
             }
 
-            // [log]
-            if (auto log = tbl["log"].as_table()) {
+            // [log] or [logging]
+            auto log = tbl["log"].as_table();
+            if (!log) {
+                log = tbl["logging"].as_table();
+            }
+            if (log) {
                 if (auto val = (*log)["level"].value<std::string>()) {
                     if (*val == "trace")           snapshot.logLevel = LogLevel::Trace;
                     else if (*val == "debug")       snapshot.logLevel = LogLevel::Debug;
                     else if (*val == "info")        snapshot.logLevel = LogLevel::Info;
                     else if (*val == "warn")        snapshot.logLevel = LogLevel::Warn;
                     else if (*val == "error")       snapshot.logLevel = LogLevel::Error;
+                }
+                if (auto val = (*log)["dir"].value<std::string>()) {
+                    std::filesystem::path p = OSTPlatform::Encoding::PathFromUtf8(*val);
+                    if (p.is_relative()) {
+                        const char* storageDir = GetStorageDirectory();
+                        if (storageDir && storageDir[0] != '\0') {
+                            snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(
+                                (OSTPlatform::Encoding::PathFromUtf8(storageDir) / p).lexically_normal());
+                        } else {
+                            snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(
+                                (OSTPlatform::Encoding::PathFromUtf8(configPath).parent_path() / p).lexically_normal());
+                        }
+                    } else {
+                        snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(p.lexically_normal());
+                    }
                 }
             }
 
@@ -152,14 +218,99 @@ namespace {
                 }
             }
 
-            // [inject]
-            if (auto inject = tbl["inject"].as_table()) {
-                if (auto val = (*inject)["enabled"].value<bool>())
-                    snapshot.injection.enabled = *val;
-                if (auto val = (*inject)["library_x86"].value<std::string>())
-                    snapshot.injection.libraryX86 = *val;
-                if (auto val = (*inject)["library_x64"].value<std::string>())
-                    snapshot.injection.libraryX64 = *val;
+            // Global injection exclusion list: read primarily from [injects], with fallbacks to [exclude_appids], [inject_blacklist], or [inject]
+            bool hasGlobalExclude = false;
+            std::unordered_set<AppId_t> globalExcludeAppids;
+            auto parseExclude = [&](const toml::table* tblNode) {
+                if (!tblNode) return;
+                auto readArr = [&](std::string_view key) {
+                    if (auto ids = (*tblNode)[key].as_array()) {
+                        hasGlobalExclude = true;
+                        for (auto& id : *ids) {
+                            if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
+                                globalExcludeAppids.insert(static_cast<AppId_t>(*v));
+                            }
+                        }
+                    }
+                };
+                readArr("exclude_appids");
+                readArr("appids");
+            };
+
+            if (auto inj = tbl["injects"].as_table()) {
+                parseExclude(inj);
+            } else if (auto bl = tbl["exclude_appids"].as_table()) {
+                parseExclude(bl);
+            } else if (auto bl2 = tbl["inject_blacklist"].as_table()) {
+                parseExclude(bl2);
+            } else if (auto bl3 = tbl["inject"].as_table()) {
+                parseExclude(bl3);
+            } else if (auto arr = tbl["exclude_appids"].as_array()) {
+                hasGlobalExclude = true;
+                for (auto& id : *arr) {
+                    if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
+                        globalExcludeAppids.insert(static_cast<AppId_t>(*v));
+                    }
+                }
+            }
+
+            // [[inject]]
+            if (auto arr = tbl["inject"].as_array()) {
+                std::filesystem::path configDir = OSTPlatform::Encoding::PathFromUtf8(configPath).parent_path();
+                for (auto& node : *arr) {
+                    auto t = node.as_table();
+                    if (!t) continue;
+                    auto path = (*t)["path"].value<std::string>();
+                    if (!path || path->empty()) continue;
+
+                    // Relative paths resolve next to opensteamtool.toml, DLL dir, or steam.exe
+                    std::filesystem::path full = OSTPlatform::Encoding::PathFromUtf8(*path);
+                    if (full.is_relative()) {
+                        std::filesystem::path candidate = configDir / full;
+                        std::error_code ec;
+                        if (std::filesystem::exists(candidate, ec)) {
+                            full = candidate;
+                        } else if (DllDir[0] != '\0' && std::filesystem::exists(OSTPlatform::Encoding::PathFromUtf8(DllDir) / full, ec)) {
+                            full = OSTPlatform::Encoding::PathFromUtf8(DllDir) / full;
+                        } else if (SteamInstallPath[0] != '\0' && std::filesystem::exists(OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / full, ec)) {
+                            full = OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / full;
+                        } else {
+                            full = candidate;
+                        }
+                    }
+                    full = full.lexically_normal();
+                    std::error_code ec;
+                    if (!std::filesystem::exists(full, ec)) {
+                        LOG_WARN("inject dll not found: {}", OSTPlatform::Encoding::PathToUtf8(full));
+                        continue;
+                    }
+
+                    InjectDll dll;
+                    dll.path = OSTPlatform::Encoding::PathToUtf8(full);
+                    if (auto val = (*t)["when_cmdline"].value<std::string>()) dll.whenCmdline = *val;
+                    if (auto val = (*t)["all_games"].value<bool>())           dll.allGames   = *val;
+                    else                                                      dll.allGames   = false;
+                    if (auto ids = (*t)["when_appids"].as_array()) {
+                        for (auto& id : *ids) {
+                            if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
+                                dll.whenAppids.insert(static_cast<AppId_t>(*v));
+                            }
+                        }
+                    }
+
+                    // Anti-cheat / compatibility exclusion list from global [injects]:
+                    // If explicitly configured in [injects], use it strictly (no default merging).
+                    // Otherwise (unconfigured), fall back to built-in default anti-cheat blacklist.
+                    dll.excludeAppids = hasGlobalExclude ? globalExcludeAppids : GetDefaultAntiCheatAppids();
+
+                    // Whitelist priority: if an AppID is explicitly specified in when_appids,
+                    // whitelist takes precedence over exclusion list, so it will not be excluded for this rule.
+                    for (AppId_t whitelistedId : dll.whenAppids) {
+                        dll.excludeAppids.erase(whitelistedId);
+                    }
+
+                    snapshot.injectDlls.push_back(std::move(dll));
+                }
             }
 
             // [cloud]
@@ -187,12 +338,12 @@ namespace {
         }
         bool shouldApplyDefault = false;
         {
-            std::lock_guard lock(g_mutex);
+            std::unique_lock lock(g_mutex);
             shouldApplyDefault = !g_loadedOnce;
         }
         if (shouldApplyDefault) {
             ApplyManifestProvider(snapshot.manifestProvider);
-            std::lock_guard lock(g_mutex);
+            std::unique_lock lock(g_mutex);
             const bool luaChanged = luaPaths != snapshot.luaPaths;
             ApplySnapshot(snapshot);
             g_loadedOnce = true;
@@ -202,7 +353,7 @@ namespace {
     }
 
     ManifestTimeouts GetManifestTimeouts() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return {
             manifestTimeoutResolve,
             manifestTimeoutConnect,
@@ -212,45 +363,51 @@ namespace {
     }
 
     LogLevel GetLogLevel() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return logLevel;
     }
 
     std::string GetLogDir() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return logDir;
     }
 
     std::vector<std::string> GetLuaPaths() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return luaPaths;
     }
 
     std::string GetRemoteUrlTemplate() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return remoteUrlTemplate;
     }
 
-    InjectionSettings GetInjectionSettings() {
-        std::lock_guard lock(g_mutex);
-        return {
-            injectEnabled,
-            injectLibraryX86,
-            injectLibraryX64,
-        };
-    }
-
     bool GetStatsEnableApi() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return statsEnableApi;
     }
 
     CloudSettings GetCloudSettings() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return {
             cloudEnabled,
             cloudLibrary,
         };
+    }
+
+    std::vector<InjectDll> GetInjectDlls() {
+        std::shared_lock lock(g_mutex);
+        return injectDlls;
+    }
+
+    bool GetManifestLockOwnedGames() {
+        std::shared_lock lock(g_mutex);
+        return manifestLockOwnedGames;
+    }
+
+    bool GetManifestAutoSyncOnUpdate() {
+        std::shared_lock lock(g_mutex);
+        return manifestAutoSyncOnUpdate;
     }
 
 }
